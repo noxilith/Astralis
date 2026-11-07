@@ -1,0 +1,21 @@
+[package]
+name = "astralis-desktop"
+version = "0.1.0"
+description = "Astralis — notes & productivity"
+edition = "2024"
+
+[lib]
+name = "astralis_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+astralis-core = { path = "../../../crates/astralis-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-notification = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["serde", "v7"] }
+base64 = "0.23.1"

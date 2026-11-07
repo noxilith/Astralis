@@ -1,0 +1,26 @@
+[package]
+name = "astralis-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+argon2 = "0.6.0"
+candle-core = { version = "0.11.1", optional = true }
+candle-nn = { version = "0.11.1", optional = true }
+candle-transformers = { version = "0.11.1", optional = true }
+chacha20poly1305 = "0.11.0"
+chrono = { version = "0.4.45", features = ["serde"] }
+getrandom = "0.4.3"
+harper-core = "3.0.0"
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"], optional = true }
+uuid = { version = "1.29.1", features = ["serde", "v7"] }
+zeroize = "1.9.1"
+
+[features]
+default = ["ml"]
+# In-app neural embedding model (candle). Without it the Brain uses a built-in lexical embedder.
+ml = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]

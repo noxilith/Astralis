@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- Deep space background -->
+    <radialGradient id="bg" cx="50%" cy="38%" r="75%">
+      <stop offset="0" stop-color="#241d52"/>
+      <stop offset="0.55" stop-color="#120f2b"/>
+      <stop offset="1" stop-color="#07060f"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.10"/>
+    </linearGradient>
+    <!-- Mark: bright white fading to soft lavender -->
+    <linearGradient id="mark" x1="0" y1="287" x2="0" y2="872" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.6" stop-color="#e9e5ff"/>
+      <stop offset="1" stop-color="#b9adff"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="627" cy="655" r="210" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#a597ff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#a597ff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+
+    <!-- The Astralis mark, drawn in a 1254-unit box (centre x = 627) -->
+    <path id="peak" d="M627 287 L856 641 C770 630 712 594 685 552 L627 463 L569 552 C542 594 484 630 398 641 Z"/>
+    <path id="wing" d="M385 663 L445 663 C520 663 575 720 607 790 C580 765 555 745 515 745 C470 745 445 770 410 795 C360 830 290 855 222 872 C262 845 290 810 300 795 Z"/>
+    <path id="star" d="M627 545 C634 612 646 646 729 653 C646 660 634 694 627 765 C620 694 608 660 525 653 C608 646 620 612 627 545 Z"/>
+  </defs>
+
+  <rect width="1024" height="1024" rx="228" fill="url(#bg)"/>
+  <rect x="3" y="3" width="1018" height="1018" rx="225" fill="none" stroke="url(#rim)" stroke-width="6"/>
+
+  <g transform="translate(512 534) scale(0.82) translate(-627 -580)">
+    <circle cx="627" cy="655" r="210" fill="url(#halo)"/>
+    <g fill="url(#mark)">
+      <use href="#peak" xlink:href="#peak"/>
+      <use href="#wing" xlink:href="#wing"/>
+      <use href="#wing" xlink:href="#wing" transform="translate(1254 0) scale(-1 1)"/>
+    </g>
+    <use href="#star" xlink:href="#star" fill="#c9bfff" filter="url(#glow)"/>
+    <use href="#star" xlink:href="#star" fill="#ffffff"/>
+  </g>
+</svg>
