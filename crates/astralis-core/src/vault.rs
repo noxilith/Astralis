@@ -369,6 +369,7 @@ impl Store {
         }
         // Images travel with the note (re-encrypted or decrypted as needed).
         self.rehome_attachments(&note.body, target)?;
+        self.refresh_crdt(note_id)?;
         self.get_note(note_id)
     }
 }

@@ -144,7 +144,7 @@ pub fn format_markdown(text: &str) -> (String, Vec<String>) {
     let mut ordered: Option<(usize, u64)> = None;
 
     for raw in text.replace("\r\n", "\n").replace('\t', "  ").lines() {
-        if is_fence(&raw) {
+        if is_fence(raw) {
             in_code = !in_code;
             let t = raw.trim_end().to_owned();
             lines.push((

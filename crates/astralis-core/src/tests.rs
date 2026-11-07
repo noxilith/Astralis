@@ -1297,3 +1297,213 @@ fn image_attachments_roundtrip_and_follow_notes() {
     s.lock_vault(v.id);
     assert!(matches!(s.get_attachment(a.id), Err(Error::VaultLocked(_))));
 }
+
+// ---------- sync between devices ----------
+
+/// Exchanges changes both ways, like two devices meeting.
+fn sync_pair(a: &Store, b: &Store) {
+    let ab = a.changes_since(&b.version_vector().unwrap()).unwrap();
+    b.apply_changes(&ab).unwrap();
+    let ba = b.changes_since(&a.version_vector().unwrap()).unwrap();
+    a.apply_changes(&ba).unwrap();
+}
+
+#[test]
+fn sync_copies_everything_and_is_idempotent() {
+    let a = store();
+    let b = store();
+    assert_ne!(a.device_id(), b.device_id());
+    let va = a.default_vault().unwrap();
+    let folder = a.create_folder(Some(va), None, "Work").unwrap();
+    let sub = a
+        .create_folder(Some(va), Some(folder.id), "Projects")
+        .unwrap();
+    let n = a
+        .create_note(NewNote {
+            title: "Plan".into(),
+            body: "See [[Ideas]]".into(),
+            tags: vec!["work".into()],
+            folder_id: Some(sub.id),
+            vault_id: Some(va),
+            ..Default::default()
+        })
+        .unwrap();
+    note_in(&a, va, "Ideas", "loose ideas");
+    let p = a
+        .create_planner(PlannerInput {
+            name: "Launch".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    a.create_task(NewTask {
+        title: "Ship".into(),
+        planner_id: Some(p.id),
+        note_id: Some(n.id),
+        ..Default::default()
+    })
+    .unwrap();
+    let img = a
+        .add_attachment(Some(va), "x.png", "image/png", b"png-bytes")
+        .unwrap();
+
+    let cs = a.changes_since(&b.version_vector().unwrap()).unwrap();
+    let stats = b.apply_changes(&cs).unwrap();
+    assert!(stats.inserted >= 8, "{stats:?}");
+
+    let got = b.get_note(n.id).unwrap();
+    assert_eq!(
+        (got.title.as_str(), got.body.as_str(), got.folder_id),
+        ("Plan", "See [[Ideas]]", Some(sub.id))
+    );
+    assert_eq!(got.tags, vec!["work"]);
+    assert_eq!(b.get_folder(sub.id).unwrap().parent_id, Some(folder.id));
+    assert_eq!(
+        b.list_tasks(&TaskFilter {
+            planner_id: Some(p.id),
+            ..Default::default()
+        })
+        .unwrap()
+        .len(),
+        1
+    );
+    assert_eq!(b.get_attachment(img.id).unwrap().1, b"png-bytes");
+    // Derived data is rebuilt locally: links resolve and search works on B.
+    assert_eq!(b.outgoing_links(n.id).unwrap()[0].notes.len(), 1);
+    assert_eq!(b.search(Some(va), "loose", false, 10).unwrap().len(), 1);
+
+    // Re-applying is harmless, and B is now caught up with A.
+    let again = b.apply_changes(&cs).unwrap();
+    assert_eq!((again.inserted, again.updated), (0, 0));
+    assert!(
+        a.changes_since(&b.version_vector().unwrap())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn sync_merges_concurrent_text_edits() {
+    let a = store();
+    let b = store();
+    let n = a
+        .create_note(NewNote {
+            title: "Shopping".into(),
+            body: "milk\neggs\n".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    sync_pair(&a, &b);
+
+    // Both devices edit the same note while apart.
+    a.update_note(
+        n.id,
+        NotePatch {
+            body: Some("milk\neggs\nbread\n".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    b.update_note(
+        n.id,
+        NotePatch {
+            body: Some("oat milk\neggs\n".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    sync_pair(&a, &b);
+
+    let ta = a.get_note(n.id).unwrap().body;
+    let tb = b.get_note(n.id).unwrap().body;
+    assert_eq!(ta, tb, "both converge");
+    assert_eq!(ta, "oat milk\neggs\nbread\n", "and keep both edits");
+}
+
+#[test]
+fn sync_last_writer_wins_for_fields_and_deletes_propagate() {
+    let a = store();
+    let b = store();
+    let n = a
+        .create_note(NewNote {
+            title: "Draft".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let gone = a
+        .create_note(NewNote {
+            title: "Temp".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    sync_pair(&a, &b);
+
+    a.update_note(
+        n.id,
+        NotePatch {
+            title: Some("From A".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tick();
+    b.update_note(
+        n.id,
+        NotePatch {
+            title: Some("From B".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    b.set_pinned(n.id, true).unwrap();
+    a.delete_note(gone.id).unwrap();
+    sync_pair(&a, &b);
+
+    let (na, nb) = (a.get_note(n.id).unwrap(), b.get_note(n.id).unwrap());
+    assert_eq!(na.title, "From B", "later edit wins");
+    assert_eq!((na.title, na.pinned), (nb.title, nb.pinned));
+    assert!(
+        matches!(b.get_note(gone.id), Err(Error::NotFound(..))),
+        "delete reached B"
+    );
+    assert!(
+        a.changes_since(&b.version_vector().unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        b.changes_since(&a.version_vector().unwrap())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn sync_encrypted_vaults_stay_encrypted_in_transit() {
+    let mut a = store();
+    let mut b = store();
+    let v = a.create_vault("Secret", Some("password1")).unwrap();
+    let n = note_in(&a, v.id, "Bank", "pin 1234");
+    let cs = a.changes_since(&b.version_vector().unwrap()).unwrap();
+    let wire = crate::sync::encode(&cs).unwrap();
+    assert!(
+        !wire.windows(4).any(|w| w == b"1234"),
+        "no plaintext in the change set"
+    );
+    assert!(!String::from_utf8_lossy(&wire).contains("Bank"));
+    b.apply_changes(&crate::sync::decode(&wire).unwrap())
+        .unwrap();
+
+    assert!(matches!(b.get_note(n.id), Err(Error::VaultLocked(_))));
+    b.unlock_vault(v.id, "password1").unwrap();
+    assert_eq!(b.get_note(n.id).unwrap().body, "pin 1234");
+    b.update_note(
+        n.id,
+        NotePatch {
+            body: Some("pin 9999".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    sync_pair(&a, &b);
+    assert_eq!(a.get_note(n.id).unwrap().body, "pin 9999");
+}

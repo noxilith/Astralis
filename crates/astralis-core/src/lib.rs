@@ -13,6 +13,7 @@ pub mod notes;
 pub mod planners;
 pub mod search;
 pub mod store;
+pub mod sync;
 pub mod tasks;
 pub mod templates;
 mod util;

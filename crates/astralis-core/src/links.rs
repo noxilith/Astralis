@@ -161,6 +161,7 @@ impl Store {
                 params![id.as_bytes(), out],
             )?;
             self.sync_links(id, &out)?;
+            self.refresh_crdt(id)?;
         }
         Ok(())
     }

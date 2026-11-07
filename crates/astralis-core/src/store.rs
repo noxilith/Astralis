@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use rusqlite::Connection;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::error::Result;
+use crate::sync::SyncCtx;
 
 /// Each entry is applied once, in order; `PRAGMA user_version` tracks progress.
 /// Never edit an existing entry — append a new one.
@@ -220,6 +222,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
 pub struct Store {
     pub(crate) conn: Connection,
     pub(crate) vault_keys: HashMap<Uuid, Zeroizing<[u8; 32]>>,
+    /// Sync state shared with the SQL change-tracking functions (clock, device id, apply flag).
+    pub(crate) sync: Arc<SyncCtx>,
 }
 
 impl Store {
@@ -238,11 +242,15 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        let sync = Arc::new(SyncCtx::default());
+        crate::sync::register_sql_functions(&conn, &sync)?;
         let mut store = Self {
             conn,
             vault_keys: HashMap::new(),
+            sync,
         };
         store.migrate()?;
+        store.init_sync()?;
         store.ensure_default_vault()?;
         store.seed_builtin_templates()?;
         Ok(store)
@@ -252,7 +260,12 @@ impl Store {
         let current: i64 = self
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
-        for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
+        let all: Vec<String> = MIGRATIONS
+            .iter()
+            .map(|s| s.to_string())
+            .chain(std::iter::once(crate::sync::sync_migration()))
+            .collect();
+        for (i, sql) in all.iter().enumerate().skip(current as usize) {
             let tx = self.conn.transaction()?;
             tx.execute_batch(sql)?;
             tx.pragma_update(None, "user_version", (i + 1) as i64)?;

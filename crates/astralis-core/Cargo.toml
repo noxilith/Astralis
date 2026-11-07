@@ -12,12 +12,13 @@ chacha20poly1305 = "0.11.0"
 chrono = { version = "0.4.45", features = ["serde"] }
 getrandom = "0.4.3"
 harper-core = "3.0.0"
-rusqlite = { version = "0.41.1", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled", "functions"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"], optional = true }
 uuid = { version = "1.29.1", features = ["serde", "v7"] }
+yrs = "0.28.1"
 zeroize = "1.9.1"
 
 [features]

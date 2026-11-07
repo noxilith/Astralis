@@ -36,7 +36,8 @@ crates/astralis-core/     All logic, UI-agnostic (SQLite, crypto, AI). Tested.
   src/vault.rs            Vaults (workspaces), optionally encrypted (Argon2id + XChaCha20-Poly1305)
   src/search.rs           Full-text search (FTS5)
   src/grammar.rs          Offline grammar/spelling (Harper, rule-based)
-  src/ai/                 The Brain — on-device AI (see below)
+  src/sync/               Sync foundation: clocks, change sets, CRDT text merging
+  src/ai/                 On-device AI (see below)
 apps/desktop/             Tauri 2 app
   src-tauri/src/          Commands (thin wrappers over the core), reminder + indexing loops
   src/                    React + TypeScript UI
@@ -67,6 +68,16 @@ tasks, calendar and planners are shared. Notes and whiteboards are both kinds of
 A vault can be **encrypted** with a password. Its notes are encrypted at rest and never indexed,
 searched, tagged, linked, versioned or embedded. Moving a note into an encrypted vault erases
 all of that derived data. Unlocked keys live only in memory. Cloud vaults are planned.
+
+## Sync foundation
+
+Every change to a synced row (vaults, folders, notes, tasks, events, planners, templates,
+images) is stamped by SQLite triggers with a hybrid logical clock and the device it came from;
+deletes leave tombstones. Devices exchange *change sets* — everything newer than what the other
+has seen — and applying them is idempotent and order-independent. Fields merge last-writer-wins;
+note text merges as a CRDT (yrs) so concurrent edits on two devices both survive. Encrypted
+vaults travel as ciphertext. Search, links, history and AI data are rebuilt on each device.
+Transport (P2P, cloud drives) is the next layer.
 
 ## Privacy
 

@@ -48,11 +48,10 @@ pub fn attachment_ids_in(body: &str) -> Vec<Uuid> {
     let mut out = Vec::new();
     for (i, _) in body.match_indices("attachments/") {
         let rest = &body[i + "attachments/".len()..];
-        if let Some(id) = rest.get(..36).and_then(|s| Uuid::parse_str(s).ok()) {
-            if !out.contains(&id) {
+        if let Some(id) = rest.get(..36).and_then(|s| Uuid::parse_str(s).ok())
+            && !out.contains(&id) {
                 out.push(id);
             }
-        }
     }
     out
 }

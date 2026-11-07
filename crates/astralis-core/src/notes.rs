@@ -247,6 +247,7 @@ impl Store {
                 self.sync_links(id, &body)?;
             }
         }
+        self.refresh_crdt(id)?;
         self.get_note(id)
     }
 
@@ -318,6 +319,7 @@ impl Store {
                 self.sync_links(current.id, &body)?;
             }
         }
+        self.refresh_crdt(current.id)?;
         self.get_note(current.id)
     }
 
