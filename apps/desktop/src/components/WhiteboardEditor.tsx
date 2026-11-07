@@ -115,7 +115,8 @@ export function WhiteboardEditor({ note, theme, readOnly }: { note: Note; theme:
           onChange={(elements, appState, files) => {
             if (readOnly) return
             const scene = JSON.stringify({
-              elements: elements.filter((el) => !el.isDeleted),
+              // Deleted elements stay as tombstones so syncing never brings them back.
+              elements,
               appState: { viewBackgroundColor: appState.viewBackgroundColor, gridSize: appState.gridSize },
               files,
             })

@@ -11,7 +11,7 @@ export function Devices() {
   const collab = useCollab()
   const [status, setStatus] = useState<P2pStatus | null>(null)
   const [name, setName] = useState('')
-  const [code, setCode] = useState<string | null>(null)
+  const [code, setCode] = useState<{ code: string; invite: string } | null>(null)
   const [joining, setJoining] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const confirm = useConfirm()
@@ -114,11 +114,21 @@ export function Devices() {
           }}
         >
           <p className="small muted" style={{ marginTop: 0 }}>
-            On the other device (same Wi-Fi or network), open <b>Settings → Devices → Join with a code</b> and enter:
+            On the other device, open <b>Settings → Devices → Join with a code</b> and enter:
           </p>
-          <div className="pair-code">{code.slice(0, 3)} {code.slice(3)}</div>
+          <div className="pair-code">{code.code.slice(0, 3)} {code.code.slice(3)}</div>
+          <p className="small muted">
+            <b>Not on the same network?</b> Send them this invite instead (any chat works) — it has no IP address, just
+            this device's identity and the code:
+          </p>
+          <div className="row">
+            <input className="input invite-input" readOnly value={code.invite} onFocus={(e) => e.currentTarget.select()} />
+            <button className="btn" onClick={() => navigator.clipboard?.writeText(code.invite).then(() => toast("Invite copied"))}>
+              Copy
+            </button>
+          </div>
           <p className="small faint" style={{ marginBottom: 0 }}>
-            The code works once and expires in 5 minutes. Everything between your devices is end-to-end encrypted.
+            Works once and expires in 5 minutes. Everything between devices is end-to-end encrypted.
           </p>
         </Modal>
       )}
@@ -132,7 +142,7 @@ export function Devices() {
               <button className="btn" onClick={() => setJoining(null)}>Cancel</button>
               <button
                 className="btn primary"
-                disabled={busy || joining.replace(/\D/g, '').length !== 6}
+                disabled={busy || !(joining.replace(/\D/g, '').length === 6 || joining.trim().startsWith('astralis:'))}
                 onClick={async () => {
                   setBusy(true)
                   try {
@@ -153,13 +163,12 @@ export function Devices() {
           }
         >
           <div className="field">
-            <label>6-digit code shown on the other device</label>
+            <label>The 6-digit code (same network) or an invite (anywhere)</label>
             <input
               className="input pair-input"
               autoFocus
               inputMode="numeric"
-              maxLength={7}
-              placeholder="123 456"
+              placeholder="123 456  or  astralis:…"
               value={joining}
               onChange={(e) => setJoining(e.target.value)}
             />

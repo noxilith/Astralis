@@ -19,10 +19,10 @@ type Theme = 'dark' | 'light'
 
 function Shell() {
   const app = useApp()
-  const { view, setView, paletteOpen, setPaletteOpen, toast, fail, bump, openTask, createNote } = app
+  const { view, setView, paletteOpen, setPaletteOpen, toast, fail, bump, openTask, createNote, refreshVaults } = app
 
   // Peer-to-peer: device list, live presence, and refresh views when synced changes land.
-  useEffect(() => startCollab(bump), [bump])
+  useEffect(() => startCollab(() => (bump(), void refreshVaults())), [bump, refreshVaults])
 
   // Errors raised outside React (e.g. image uploads from the editor) surface as toasts.
   useEffect(() => {

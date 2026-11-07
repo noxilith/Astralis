@@ -30,6 +30,8 @@ const KDF_T: u32 = if cfg!(test) { 1 } else { 3 };
 const KDF_P: u32 = 1;
 const MIN_PASSWORD_LEN: usize = 8;
 pub const DEFAULT_VAULT_NAME: &str = "Personal";
+/// Setting holding the id of the vault this device created automatically on first run.
+const AUTO_VAULT_KEY: &str = "auto_vault";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,6 +129,7 @@ impl Store {
             None if vaults == 0 || orphans > 0 => {
                 let id = Uuid::now_v7();
                 self.insert_plain_vault(id, DEFAULT_VAULT_NAME)?;
+                self.set_setting(AUTO_VAULT_KEY, &id.to_string())?;
                 id.as_bytes().to_vec()
             }
             None => return Ok(()),
@@ -354,13 +357,13 @@ impl Store {
             self.conn
                 .execute("DELETE FROM embeddings WHERE note_id = ?1", [id])?;
             self.conn.execute(
-                "UPDATE notes SET title = '', body = '', cipher = ?2, vault_id = ?3, folder_id = NULL, updated_at = ?4 WHERE id = ?1",
+                "UPDATE notes SET title = '', body = '', cipher = ?2, vault_id = ?3, folder_id = NULL, crdt = NULL, updated_at = ?4 WHERE id = ?1",
                 params![id, cipher, target.as_bytes(), now_ms()],
             )?;
             self.prune_tags()?;
         } else {
             self.conn.execute(
-                "UPDATE notes SET title = ?2, body = ?3, cipher = NULL, vault_id = ?4, folder_id = NULL, updated_at = ?5 WHERE id = ?1",
+                "UPDATE notes SET title = ?2, body = ?3, cipher = NULL, vault_id = ?4, folder_id = NULL, crdt = NULL, updated_at = ?5 WHERE id = ?1",
                 params![id, note.title, note.body, target.as_bytes(), now_ms()],
             )?;
             if note.kind == NoteKind::Note {
@@ -371,5 +374,56 @@ impl Store {
         self.rehome_attachments(&note.body, target)?;
         self.refresh_crdt(note_id)?;
         self.get_note(note_id)
+    }
+}
+
+impl Store {
+    /// After syncing with another device: if this device's automatic first-run vault is still
+    /// empty and another vault can take its place, remove it — so pairing two fresh devices
+    /// doesn't leave two "Personal" vaults. Deterministic, so both devices make the same call.
+    pub(crate) fn collapse_empty_default_vault(&self) -> Result<()> {
+        let mine = match self.get_setting(AUTO_VAULT_KEY)? {
+            Some(id) => id.parse::<Uuid>().ok(),
+            // Databases from before this existed: the oldest plain "Personal" vault.
+            None => self
+                .conn
+                .query_row(
+                    "SELECT id FROM vaults WHERE encrypted = 0 AND name = ?1 ORDER BY created_at LIMIT 1",
+                    [DEFAULT_VAULT_NAME],
+                    |r| uuid_col(r, 0),
+                )
+                .optional()?,
+        };
+        let Some(mine) = mine else { return Ok(()) };
+        let used = |vault: Uuid| -> Result<bool> {
+            let n: i64 = self.conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM notes WHERE vault_id = ?1)
+                      + (SELECT COUNT(*) FROM folders WHERE vault_id = ?1)
+                      + (SELECT COUNT(*) FROM attachments WHERE vault_id = ?1)",
+                [vault.as_bytes()],
+                |r| r.get(0),
+            )?;
+            Ok(n > 0)
+        };
+        if self.vault_is_encrypted(mine).unwrap_or(true) || used(mine)? {
+            return Ok(());
+        }
+        let others: Vec<Uuid> = {
+            let mut stmt = self.conn.prepare("SELECT id FROM vaults WHERE encrypted = 0 AND id != ?1")?;
+            stmt.query_map([mine.as_bytes()], |r| uuid_col(r, 0))?.collect::<rusqlite::Result<_>>()?
+        };
+        // Give way to a vault that has content, or (if all are empty) to the smaller id.
+        let mut replace = false;
+        for other in others {
+            if used(other)? || other < mine {
+                replace = true;
+                break;
+            }
+        }
+        if replace {
+            self.conn.execute("DELETE FROM vaults WHERE id = ?1", [mine.as_bytes()])?;
+            self.conn.execute("DELETE FROM settings WHERE key = ?1", [AUTO_VAULT_KEY])?;
+        }
+        Ok(())
     }
 }

@@ -214,7 +214,7 @@ const handlers: Record<string, (a: Args) => unknown> = {
   },
   p2p_status: () => ({ ready: true, id: 'mock-device', name: 'This device', peers: [] }),
   p2p_set_name: () => undefined,
-  p2p_start_pairing: () => '482913',
+  p2p_start_pairing: () => ({ code: '482913', invite: 'astralis:mockdeviceid:482913' }),
   p2p_cancel_pairing: () => undefined,
   p2p_join: () => { throw 'no Astralis devices found nearby — make sure both are on the same network' },
   p2p_unpair: () => undefined,

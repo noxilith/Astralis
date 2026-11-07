@@ -280,13 +280,24 @@ impl Net {
         *self.inner.pairing.lock().unwrap() = None;
     }
 
-    /// Joins a device that is showing `code`. Tries every Astralis device nearby (or `addr`).
-    pub async fn join(&self, code: &str, addr: Option<EndpointAddr>) -> Result<PeerStatus> {
-        let code: String = code.chars().filter(|c| c.is_ascii_digit()).collect();
+    /// An invite for pairing from anywhere (not just the local network): this device's identity
+    /// plus the pairing code. It contains no IP address — the other device finds this one by
+    /// identity (published via DNS, reached directly or through an encrypted relay).
+    pub fn invite(&self, code: &str) -> String {
+        format!("astralis:{}:{}", self.inner.endpoint.id(), code)
+    }
+
+    /// Joins a device that is showing a pairing code. `input` is either the 6-digit code (finds
+    /// the device on the local network) or an invite from [`Net::invite`] (works anywhere).
+    pub async fn join(&self, input: &str, addr: Option<EndpointAddr>) -> Result<PeerStatus> {
+        let (invited, code) = match parse_invite(input) {
+            Some((id, code)) => (Some(EndpointAddr::from(id)), code),
+            None => (None, input.chars().filter(|c| c.is_ascii_digit()).collect()),
+        };
         if code.len() != 6 {
-            bail!("the code has 6 digits");
+            bail!("enter the 6-digit code, or paste an invite");
         }
-        let targets: Vec<EndpointAddr> = match addr {
+        let targets: Vec<EndpointAddr> = match addr.or(invited) {
             Some(a) => vec![a],
             None => {
                 let trusted = self.inner.trusted.lock().unwrap();
@@ -302,7 +313,7 @@ impl Net {
                 Err(e) => tracing::debug!("pairing attempt failed: {e:#}"),
             }
         }
-        bail!("no nearby device accepted that code")
+        bail!("no device accepted that code — check it and try again")
     }
 
     /// Forgets a paired device and disconnects it.
@@ -639,3 +650,21 @@ fn merge_vv(a: &VersionVector, b: &VersionVector) -> VersionVector {
 
 #[cfg(test)]
 mod tests;
+
+/// Parses `astralis:<device id>:<6-digit code>` (whitespace and line breaks tolerated).
+pub fn parse_invite(s: &str) -> Option<(EndpointId, String)> {
+    let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    let rest = s.strip_prefix("astralis:")?;
+    let (id, code) = rest.rsplit_once(':')?;
+    let code: String = code.chars().filter(|c| c.is_ascii_digit()).collect();
+    (code.len() == 6).then_some(())?;
+    Some((id.parse().ok()?, code))
+}
+
+impl Net {
+    /// Waits until this device is reachable from the internet (relay connected, identity
+    /// published), or the timeout passes. Returns whether it got online.
+    pub async fn wait_online(&self, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, self.inner.endpoint.online()).await.is_ok()
+    }
+}

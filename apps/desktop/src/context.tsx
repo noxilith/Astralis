@@ -74,6 +74,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setVaultIdState(id)
     api.setSetting('activeVault', id).catch(() => {})
   }, [])
+  // If the active vault disappears (deleted, or merged away after pairing), fall back.
+  useEffect(() => {
+    if (vaultId && vaults.length && !vaults.some((v) => v.id === vaultId)) {
+      api.defaultVault().then(setVaultId).catch(() => {})
+    }
+  }, [vaults, vaultId, setVaultId])
   // Folders belong to a vault: switching vaults resets the active folder.
   useEffect(() => setActiveFolderId(null), [vaultId])
 

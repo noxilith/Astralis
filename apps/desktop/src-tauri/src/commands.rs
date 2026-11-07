@@ -355,9 +355,20 @@ pub fn p2p_set_name(state: S<'_>, name: String) -> Result<()> {
     net_of(&state)?.set_name(&name).map_err(net_err)
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pairing {
+    /// 6-digit code (for devices on the same network).
+    code: String,
+    /// Code plus this device's identity (works from anywhere).
+    invite: String,
+}
+
 #[tauri::command]
-pub fn p2p_start_pairing(state: S<'_>) -> Result<String> {
-    Ok(net_of(&state)?.start_pairing())
+pub fn p2p_start_pairing(state: S<'_>) -> Result<Pairing> {
+    let net = net_of(&state)?;
+    let code = net.start_pairing();
+    Ok(Pairing { invite: net.invite(&code), code })
 }
 
 #[tauri::command]

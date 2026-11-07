@@ -1520,3 +1520,81 @@ fn live_text_states_merge_into_notes() {
     assert_eq!(b.merge_note_text(n.id, &state).unwrap().as_deref(), Some("xabcd"));
     assert_eq!(b.merge_note_text(n.id, &state).unwrap(), None, "no change the second time");
 }
+
+#[test]
+fn sync_merges_concurrent_edits_in_encrypted_notes() {
+    let mut a = store();
+    let mut b = store();
+    let v = a.create_vault("Secret", Some("password1")).unwrap();
+    let n = note_in(&a, v.id, "Diary", "one\ntwo\n");
+    sync_pair(&a, &b);
+    b.unlock_vault(v.id, "password1").unwrap();
+
+    a.update_note(n.id, NotePatch { body: Some("one\ntwo\nthree\n".into()), ..Default::default() }).unwrap();
+    b.update_note(n.id, NotePatch { body: Some("zero\none\ntwo\n".into()), ..Default::default() }).unwrap();
+    sync_pair(&a, &b);
+    assert_eq!(a.get_note(n.id).unwrap().body, "zero\none\ntwo\nthree\n");
+    assert_eq!(b.get_note(n.id).unwrap().body, "zero\none\ntwo\nthree\n");
+    // The CRDT state is sealed too: no plaintext anywhere in the row.
+    let crdt: Vec<u8> = a.conn.query_row("SELECT crdt FROM notes WHERE id = ?1", [n.id.as_bytes()], |r| r.get(0)).unwrap();
+    assert!(!crdt.windows(5).any(|w| w == b"three"));
+    // Live text works in encrypted vaults too.
+    a.update_note(n.id, NotePatch { body: Some("zero\none\ntwo\nthree\nfour\n".into()), ..Default::default() }).unwrap();
+    let state = a.note_text_state(n.id).unwrap().unwrap();
+    assert_eq!(b.merge_note_text(n.id, &state).unwrap().as_deref(), Some("zero\none\ntwo\nthree\nfour\n"));
+}
+
+#[test]
+fn sync_merges_whiteboards_by_element() {
+    let a = store();
+    let b = store();
+    let w = a.create_whiteboard(None, "Board").unwrap();
+    let el = |id: &str, v: u32, deleted: bool| {
+        format!(r#"{{"id":"{id}","type":"rectangle","version":{v},"versionNonce":{v}0,"isDeleted":{deleted}}}"#)
+    };
+    a.save_whiteboard_scene(w.id, &format!(r#"{{"elements":[{}]}}"#, el("shared", 1, false))).unwrap();
+    sync_pair(&a, &b);
+
+    // A draws a box and deletes the shared one; B draws a circle — at the same time.
+    a.save_whiteboard_scene(w.id, &format!(r#"{{"elements":[{},{}]}}"#, el("shared", 2, true), el("box", 1, false))).unwrap();
+    b.save_whiteboard_scene(w.id, &format!(r#"{{"elements":[{},{}]}}"#, el("shared", 1, false), el("circle", 1, false))).unwrap();
+    sync_pair(&a, &b);
+
+    for s in [&a, &b] {
+        let scene: serde_json::Value = serde_json::from_str(&s.get_note(w.id).unwrap().body).unwrap();
+        let els = scene["elements"].as_array().unwrap();
+        let find = |id: &str| els.iter().find(|e| e["id"] == id).cloned();
+        assert!(find("box").is_some() && find("circle").is_some(), "both new shapes survive: {scene}");
+        assert_eq!(find("shared").unwrap()["isDeleted"], true, "the delete wins over the stale copy");
+    }
+}
+
+#[test]
+fn pairing_fresh_devices_leaves_one_personal_vault() {
+    // Both empty: they agree on one.
+    let a = store();
+    let b = store();
+    sync_pair(&a, &b);
+    sync_pair(&a, &b);
+    let (va, vb) = (a.list_vaults().unwrap(), b.list_vaults().unwrap());
+    assert_eq!(va.len(), 1, "{va:?}");
+    assert_eq!(va[0].id, vb[0].id);
+
+    // One has notes: the empty one gives way.
+    let c = store();
+    let d = store();
+    let n = note(&c, "Kept", "");
+    sync_pair(&c, &d);
+    sync_pair(&c, &d);
+    let vd = d.list_vaults().unwrap();
+    assert_eq!(vd.len(), 1, "{vd:?}");
+    assert_eq!(d.get_note(n.id).unwrap().vault_id, vd[0].id);
+
+    // Both have notes: both vaults stay.
+    let e = store();
+    let f = store();
+    note(&e, "E", "");
+    note(&f, "F", "");
+    sync_pair(&e, &f);
+    assert_eq!(e.list_vaults().unwrap().len(), 2);
+}

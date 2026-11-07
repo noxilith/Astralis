@@ -137,3 +137,47 @@ async fn devices_find_each_other_on_the_lan() {
     }
     panic!("devices didn't discover each other via mDNS");
 }
+
+#[test]
+fn invites_round_trip() {
+    let key = SecretKey::generate();
+    let id = key.public();
+    let invite = format!("astralis:{id}:123456");
+    assert_eq!(parse_invite(&invite), Some((id, "123456".into())));
+    assert_eq!(parse_invite(&format!(" astralis:{id}:\n123 456 ")), Some((id, "123456".into())));
+    assert_eq!(parse_invite("123456"), None);
+    assert_eq!(parse_invite("astralis:not-an-id:123456"), None);
+}
+
+/// Pairing and syncing between two devices that only know each other's identity — through
+/// n0's public relays and DNS, like two devices on different networks.
+/// Needs internet; run with `cargo test -p astralis-net -- --ignored`.
+#[tokio::test]
+#[ignore]
+async fn pair_and_sync_across_the_internet() {
+    let mk = |name: &'static str| async move {
+        let store: StoreHandle = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        store.lock().unwrap().set_setting(NAME_KEY, name).unwrap();
+        let net = Net::start(store.clone(), SecretKey::generate(), NetOptions { relays: true, mdns: false }, Arc::new(|_| {}))
+            .await
+            .unwrap();
+        (net, store)
+    };
+    let (a, sa) = mk("Home").await;
+    let (b, sb) = mk("Work").await;
+    assert!(a.wait_online(Duration::from_secs(20)).await, "A couldn't reach the relay");
+    assert!(b.wait_online(Duration::from_secs(20)).await, "B couldn't reach the relay");
+
+    let n = sa.lock().unwrap().create_note(NewNote { title: "Far away".into(), ..Default::default() }).unwrap();
+    let code = a.start_pairing();
+    // Only the invite text crosses over — no addresses.
+    let peer = b.join(&a.invite(&code), None).await.unwrap();
+    assert_eq!(peer.name, "Home");
+    for _ in 0..200 {
+        if sb.lock().unwrap().get_note(n.id).is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("note didn't sync across the internet");
+}

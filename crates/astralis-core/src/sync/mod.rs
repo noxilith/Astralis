@@ -13,8 +13,11 @@
 //! Derived, per-device data (search index, links, history, AI embeddings, settings) isn't synced;
 //! it's rebuilt locally from the synced rows.
 
+mod content;
 mod crdt;
 pub mod hlc;
+
+pub use content::merge_scene;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -283,42 +286,6 @@ impl Store {
         self.sync.device.lock().unwrap().clone()
     }
 
-    /// Keeps a note's CRDT text state in step with its `body` (plain text notes only; encrypted
-    /// notes and whiteboards merge last-writer-wins for now).
-    pub(crate) fn refresh_crdt(&self, id: Uuid) -> Result<()> {
-        let row: Option<(String, bool, String, Option<Vec<u8>>)> = self
-            .conn
-            .query_row(
-                "SELECT kind, cipher IS NOT NULL, body, crdt FROM notes WHERE id = ?1",
-                [id.as_bytes()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .optional()?;
-        let Some((kind, encrypted, body, state)) = row else {
-            return Ok(());
-        };
-        if kind != "note" || encrypted {
-            if state.is_some() {
-                self.conn.execute(
-                    "UPDATE notes SET crdt = NULL WHERE id = ?1",
-                    [id.as_bytes()],
-                )?;
-            }
-            return Ok(());
-        }
-        let client = crdt::client_id(&self.device_id());
-        if let Some(s) = &state
-            && crdt::read_text(s)? == body {
-                return Ok(());
-            }
-        let next = crdt::set_text(state.as_deref(), &body, client)?;
-        self.conn.execute(
-            "UPDATE notes SET crdt = ?2 WHERE id = ?1",
-            params![id.as_bytes(), next],
-        )?;
-        Ok(())
-    }
-
     /// The highest clock this device has seen from every origin.
     pub fn version_vector(&self) -> Result<VersionVector> {
         let mut vv = VersionVector::new();
@@ -497,14 +464,17 @@ impl Store {
                 )
                 .optional()?;
 
-            // Note text merges as a CRDT regardless of which side "wins" the other fields.
-            let mut merged: Option<(Vec<u8>, String)> = None;
-            if table == "notes"
-                && let (Some((_, Some(mine))), Some(SqlValue::Blob(theirs))) =
-                    (&local, row.values.get("crdt"))
-                {
-                    merged = Some(crdt::merge(mine, theirs)?);
+            // Note text (CRDT) and whiteboards (per element) merge instead of last-writer-wins:
+            // capture both sides' content now, merge after the row is written.
+            let merge_pair = if table == "notes" && local.is_some() {
+                match (self.local_content(Uuid::from_slice(id).map_err(|_| Error::invalid("bad id"))?)?, self.remote_content(id, &row.values)?) {
+                    (Some(l), Some(r)) => Some((l, r)),
+                    _ => None,
                 }
+            } else {
+                None
+            };
+            let mut wrote_row = true;
 
             match &local {
                 None => {
@@ -535,11 +505,7 @@ impl Store {
                         if k.as_str() == "id" {
                             continue;
                         }
-                        let v = match (k.as_str(), &merged) {
-                            ("crdt", Some((state, _))) => Value::Blob(state.clone()),
-                            ("body", Some((_, text))) => Value::Text(text.clone()),
-                            _ => Value::from(*v),
-                        };
+                        let v = Value::from(*v);
                         args.push(v);
                         sets.push(format!("{k} = ?{}", args.len()));
                     }
@@ -555,17 +521,21 @@ impl Store {
                     self.apply_tags(table, id, row)?;
                     stats.updated += 1;
                 }
-                Some(_) => match merged {
-                    // Local fields are newer, but the text still merges in the other side's edits.
-                    Some((state, text)) => {
-                        self.conn.execute(
-                            "UPDATE notes SET crdt = ?2, body = ?3 WHERE id = ?1",
-                            params![id, state, text],
-                        )?;
-                        stats.merged += 1;
+                Some(_) => {
+                    wrote_row = false;
+                    if merge_pair.is_none() {
+                        stats.skipped += 1;
                     }
-                    None => stats.skipped += 1,
-                },
+                }
+            }
+            if let Some((l, r)) = &merge_pair
+                && let Some((body, state)) = Store::merge_contents(l, r)?
+            {
+                let uid = Uuid::from_slice(id).map_err(|_| Error::invalid("bad id"))?;
+                self.write_content_raw(uid, &body, state.as_deref())?;
+                if !wrote_row {
+                    stats.merged += 1;
+                }
             }
         }
 
@@ -653,6 +623,7 @@ impl Store {
             }
         }
         self.prune_tags()?;
+        self.collapse_empty_default_vault()?;
         Ok(())
     }
 }
@@ -667,7 +638,7 @@ pub fn decode(bytes: &[u8]) -> Result<ChangeSet> {
 }
 
 impl Store {
-    /// A note's CRDT text state (plain text notes only), for live collaboration.
+    /// A note's CRDT text state as stored (sealed in encrypted vaults), for live collaboration.
     pub fn note_text_state(&self, id: Uuid) -> Result<Option<Vec<u8>>> {
         Ok(self
             .conn
@@ -676,21 +647,30 @@ impl Store {
             .flatten())
     }
 
-    /// Merges a peer's live text state into a note. Returns the new body if it changed.
-    /// The peer stamps and syncs its own edit; this only folds the text in.
+    /// Merges a peer's live text state (as from [`Store::note_text_state`]) into a note.
+    /// Returns the new body if it changed. The peer stamps and syncs its own edit; this only
+    /// folds the text in. Encrypted notes need their vault unlocked.
     pub fn merge_note_text(&self, id: Uuid, state: &[u8]) -> Result<Option<String>> {
-        let Some(mine) = self.note_text_state(id)? else { return Ok(None) };
-        let (merged, text) = crdt::merge(&mine, state)?;
-        let body: String = self.conn.query_row("SELECT body FROM notes WHERE id = ?1", [id.as_bytes()], |r| r.get(0))?;
-        if text == body {
+        let Some(local) = self.local_content(id)? else { return Ok(None) };
+        let Some(mine) = &local.state else { return Ok(None) };
+        let theirs = if local.encrypted {
+            let key = self.require_unlocked(local.vault)?;
+            crate::vault::open(key, &[id.as_bytes().as_slice(), b":crdt"].concat(), state)?.to_vec()
+        } else {
+            state.to_vec()
+        };
+        let (merged, text) = crdt::merge(mine, &theirs)?;
+        if text == local.body {
             return Ok(None);
         }
         self.sync.applying.store(true, Ordering::SeqCst);
-        let _guard = ApplyingGuard(&self.sync.applying);
-        self.conn.execute("UPDATE notes SET crdt = ?2, body = ?3 WHERE id = ?1", params![id.as_bytes(), merged, text])?;
-        drop(_guard);
+        let guard = ApplyingGuard(&self.sync.applying);
+        self.write_content_raw(id, &text, Some(&merged))?;
+        drop(guard);
         self.conn.execute("DELETE FROM embeddings WHERE note_id = ?1", [id.as_bytes()])?;
-        self.sync_links(id, &text)?;
+        if !local.encrypted {
+            self.sync_links(id, &text)?;
+        }
         Ok(Some(text))
     }
 }
