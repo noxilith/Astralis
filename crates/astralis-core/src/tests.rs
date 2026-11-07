@@ -1507,3 +1507,16 @@ fn sync_encrypted_vaults_stay_encrypted_in_transit() {
     sync_pair(&a, &b);
     assert_eq!(a.get_note(n.id).unwrap().body, "pin 9999");
 }
+
+#[test]
+fn live_text_states_merge_into_notes() {
+    let a = store();
+    let b = store();
+    let n = a.create_note(NewNote { title: "Live".into(), body: "abc".into(), ..Default::default() }).unwrap();
+    sync_pair(&a, &b);
+    a.update_note(n.id, NotePatch { body: Some("abcd".into()), ..Default::default() }).unwrap();
+    b.update_note(n.id, NotePatch { body: Some("xabc".into()), ..Default::default() }).unwrap();
+    let state = a.note_text_state(n.id).unwrap().unwrap();
+    assert_eq!(b.merge_note_text(n.id, &state).unwrap().as_deref(), Some("xabcd"));
+    assert_eq!(b.merge_note_text(n.id, &state).unwrap(), None, "no change the second time");
+}

@@ -665,3 +665,32 @@ pub fn encode(cs: &ChangeSet) -> Result<Vec<u8>> {
 pub fn decode(bytes: &[u8]) -> Result<ChangeSet> {
     serde_json::from_slice(bytes).map_err(|e| Error::Invalid(format!("bad change set: {e}")))
 }
+
+impl Store {
+    /// A note's CRDT text state (plain text notes only), for live collaboration.
+    pub fn note_text_state(&self, id: Uuid) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .conn
+            .query_row("SELECT crdt FROM notes WHERE id = ?1", [id.as_bytes()], |r| r.get(0))
+            .optional()?
+            .flatten())
+    }
+
+    /// Merges a peer's live text state into a note. Returns the new body if it changed.
+    /// The peer stamps and syncs its own edit; this only folds the text in.
+    pub fn merge_note_text(&self, id: Uuid, state: &[u8]) -> Result<Option<String>> {
+        let Some(mine) = self.note_text_state(id)? else { return Ok(None) };
+        let (merged, text) = crdt::merge(&mine, state)?;
+        let body: String = self.conn.query_row("SELECT body FROM notes WHERE id = ?1", [id.as_bytes()], |r| r.get(0))?;
+        if text == body {
+            return Ok(None);
+        }
+        self.sync.applying.store(true, Ordering::SeqCst);
+        let _guard = ApplyingGuard(&self.sync.applying);
+        self.conn.execute("UPDATE notes SET crdt = ?2, body = ?3 WHERE id = ?1", params![id.as_bytes(), merged, text])?;
+        drop(_guard);
+        self.conn.execute("DELETE FROM embeddings WHERE note_id = ?1", [id.as_bytes()])?;
+        self.sync_links(id, &text)?;
+        Ok(Some(text))
+    }
+}
