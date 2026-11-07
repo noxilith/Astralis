@@ -2,6 +2,7 @@
 # Astralis dev helper.
 #
 #   ./run.sh app          Launch the desktop app in dev mode (hot reload)
+#   ./run.sh second       Open a second app window with its own profile (try P2P on one machine)
 #   ./run.sh test         Run the core test suite (default)
 #   ./run.sh build        Build release installers
 #   ./run.sh ui           Run just the frontend in a browser (with a mock backend)
@@ -47,6 +48,9 @@ cmd="${1:-test}"
 
 case "$cmd" in
     app)    need_webkit; need_npm; cd "$APP" && exec npx tauri dev "$@" ;;
+    second) # A second window with its own profile (own notes + device identity) to try P2P on one machine.
+            # Needs `./run.sh app` running (it serves the UI).
+            need_webkit; ASTRALIS_PROFILE="${1:-second}" exec "$ROOT/target/debug/astralis-desktop" ;;
     build)  need_webkit; need_npm; cd "$APP" && exec npx tauri build "$@" ;;
     ui)     need_npm; cd "$APP" && exec npm run dev -- --open "$@" ;;
     test)   exec cargo test "$@" ;;

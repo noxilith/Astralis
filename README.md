@@ -77,7 +77,11 @@ deletes leave tombstones. Devices exchange *change sets* — everything newer th
 has seen — and applying them is idempotent and order-independent. Fields merge last-writer-wins;
 note text merges as a CRDT (yrs) so concurrent edits on two devices both survive. Encrypted
 vaults travel as ciphertext. Search, links, history and AI data are rebuilt on each device.
-Transport (P2P, cloud drives) is the next layer.
+Paired devices sync **peer-to-peer** (iroh: encrypted QUIC, found on the local network via mDNS,
+paired with a single-use 6-digit code in Settings → Devices). While two devices are connected,
+editing is **live**: text streams as you type, and each person's caret (notes) or pointer
+(whiteboards) shows with their name. Try it on one machine with `./run.sh app` plus
+`./run.sh second` (a second window with its own profile). Cloud drives are the next layer.
 
 ## Privacy
 

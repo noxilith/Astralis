@@ -7,6 +7,7 @@ import { Sidebar } from './components/Sidebar'
 import { CommandPalette } from './components/CommandPalette'
 import { Toasts } from './components/ui'
 import { QuickNote } from './components/QuickNote'
+import { startCollab } from './lib/collab'
 import { NoteEditor } from './views/NoteEditor'
 import { Productivity } from './views/Productivity'
 import { GraphView } from './views/GraphView'
@@ -19,6 +20,9 @@ type Theme = 'dark' | 'light'
 function Shell() {
   const app = useApp()
   const { view, setView, paletteOpen, setPaletteOpen, toast, fail, bump, openTask, createNote } = app
+
+  // Peer-to-peer: device list, live presence, and refresh views when synced changes land.
+  useEffect(() => startCollab(bump), [bump])
 
   // Errors raised outside React (e.g. image uploads from the editor) surface as toasts.
   useEffect(() => {

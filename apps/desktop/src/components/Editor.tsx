@@ -25,6 +25,7 @@ import { codeHighlighter } from '../lib/highlight'
 import { tags as t } from '@lezer/highlight'
 import { api } from '../api'
 import { runMarkdown } from '../lib/markdown'
+import { remoteCaretsField, remoteChange, setRemoteCarets, type RemoteCaret } from '../lib/remoteCarets'
 import { imageFiles, insertImages } from '../lib/attachments'
 
 const highlight = HighlightStyle.define([
@@ -130,7 +131,12 @@ export interface EditorProps {
   value: string
   /** Vault used for [[link]] suggestions. */
   vaultId?: string | null
-  onChange: (value: string) => void
+  /** `remote` is true when the change came from another device (don't echo it back). */
+  onChange: (value: string, remote: boolean) => void
+  /** Local caret/selection moved (UTF-16 offsets), for showing it to collaborators. */
+  onSelection?: (anchor: number, head: number) => void
+  /** Other people's carets to draw. */
+  remoteCarets?: RemoteCaret[]
   onOpenLink?: (title: string) => void
   grammar?: boolean
   placeholder?: string
@@ -140,13 +146,13 @@ export interface EditorProps {
 }
 
 /** Markdown editor with [[link]] autocomplete, Ctrl/Cmd-click to follow links, and offline grammar checks. */
-export function Editor({ value, vaultId = null, onChange, onOpenLink, grammar = true, placeholder, autoFocus, onReady }: EditorProps) {
+export function Editor({ value, vaultId = null, onChange, onOpenLink, onSelection, remoteCarets, grammar = true, placeholder, autoFocus, onReady }: EditorProps) {
   const host = useRef<HTMLDivElement>(null)
   const vaultRef = useRef(vaultId)
   vaultRef.current = vaultId
   const viewRef = useRef<EditorView | null>(null)
-  const cbs = useRef({ onChange, onOpenLink })
-  cbs.current = { onChange, onOpenLink }
+  const cbs = useRef({ onChange, onOpenLink, onSelection })
+  cbs.current = { onChange, onOpenLink, onSelection }
   const grammarSlot = useRef(new Compartment())
   const lintRef = useRef<Extension>([])
 
@@ -192,6 +198,7 @@ export function Editor({ value, vaultId = null, onChange, onOpenLink, grammar = 
           syntaxHighlighting(highlight),
           syntaxHighlighting(codeHighlighter),
           codeBlockLines,
+          remoteCaretsField,
           wikilinkMarks,
           autocompletion({ override: [wikilinkCompletions(() => vaultRef.current)], activateOnTyping: true }),
           grammarSlot.current.of(grammar ? grammarLinter : []),
@@ -208,7 +215,12 @@ export function Editor({ value, vaultId = null, onChange, onOpenLink, grammar = 
             indentWithTab,
           ]),
           EditorView.updateListener.of((u) => {
-            if (u.docChanged) cbs.current.onChange(u.state.doc.toString())
+            const remote = u.transactions.some((t) => t.annotation(remoteChange))
+            if (u.docChanged) cbs.current.onChange(u.state.doc.toString(), remote)
+            if ((u.selectionSet || u.docChanged) && !remote) {
+              const s = u.state.selection.main
+              cbs.current.onSelection?.(s.anchor, s.head)
+            }
           }),
           EditorView.domEventHandlers({
             mousedown: (e, v) => {
@@ -259,6 +271,11 @@ export function Editor({ value, vaultId = null, onChange, onOpenLink, grammar = 
     if (!view) return
     view.dispatch({ effects: grammarSlot.current.reconfigure(grammar ? lintRef.current : []) })
   }, [grammar])
+
+  // Draw collaborators' carets.
+  useEffect(() => {
+    viewRef.current?.dispatch({ effects: setRemoteCarets.of(remoteCarets ?? []) })
+  }, [remoteCarets])
 
   return <div className="editor-host" ref={host} />
 }

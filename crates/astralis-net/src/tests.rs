@@ -112,3 +112,28 @@ async fn pairing_code_is_single_use_and_rate_limited() {
     }
     assert!(c.net.join(&code, Some(a.net.addr())).await.is_err(), "pairing was cancelled");
 }
+
+/// Real mDNS discovery between two devices on this machine's network.
+/// Ignored by default (needs multicast); run with `cargo test -p astralis-net -- --ignored`.
+#[tokio::test]
+#[ignore]
+async fn devices_find_each_other_on_the_lan() {
+    let mk = |name: &'static str| async move {
+        let store: StoreHandle = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        store.lock().unwrap().set_setting(NAME_KEY, name).unwrap();
+        Net::start(store, SecretKey::generate(), NetOptions { relays: false, mdns: true }, Arc::new(|_| {})).await.unwrap()
+    };
+    let a = mk("Laptop").await;
+    let b = mk("Desktop").await;
+    for _ in 0..200 {
+        if b.peers().iter().any(|p| p.id == a.id() && p.nearby && p.name == "Laptop") {
+            // And pairing works purely through discovery (no address given).
+            let code = a.start_pairing();
+            let peer = b.join(&code, None).await.unwrap();
+            assert_eq!(peer.name, "Laptop");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("devices didn't discover each other via mDNS");
+}

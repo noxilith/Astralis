@@ -13,7 +13,10 @@ use tauri_plugin_notification::NotificationExt;
 const MODEL_NAME: &str = "all-MiniLM-L6-v2";
 
 pub struct AppState {
-    pub store: Mutex<Store>,
+    /// Shared with the P2P service, which reads and applies changes.
+    pub store: Arc<Mutex<Store>>,
+    /// Peer-to-peer sync (started in the background after launch).
+    pub net: std::sync::OnceLock<Arc<astralis_net::Net>>,
     pub brain: Mutex<Brain>,
     pub grammar: Mutex<Option<Grammar>>,
 }
@@ -98,20 +101,48 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            let data_dir = app.path().app_data_dir()?;
+            // ASTRALIS_PROFILE=name runs a separate profile (own database and device identity),
+            // e.g. to try sync with two windows on one computer.
+            let mut data_dir = app.path().app_data_dir()?;
+            if let Ok(profile) = std::env::var("ASTRALIS_PROFILE") {
+                data_dir = data_dir.join(format!("profile-{profile}"));
+            }
             let store = Store::open(data_dir.join("astralis.db"))?;
             let brain = Brain::new(find_model_dir(app.handle()));
             let state: SharedState = Arc::new(AppState {
-                store: Mutex::new(store),
+                store: Arc::new(Mutex::new(store)),
+                net: std::sync::OnceLock::new(),
                 brain: Mutex::new(brain),
                 grammar: Mutex::new(None),
             });
             app.manage(state.clone());
             spawn_reminder_loop(app.handle().clone(), state.clone());
-            spawn_brain_loop(app.handle().clone(), state);
+            spawn_brain_loop(app.handle().clone(), state.clone());
+            spawn_p2p(app.handle().clone(), state, data_dir.join("device.key"));
             Ok(())
         })
         .invoke_handler(commands::handler())
         .run(tauri::generate_context!())
         .expect("error while running Astralis");
+}
+
+/// Starts peer-to-peer sync. Events go to the UI as `p2p`; synced data also refreshes views.
+fn spawn_p2p(app: AppHandle, state: SharedState, key_path: PathBuf) {
+    tauri::async_runtime::spawn(async move {
+        let key = match astralis_net::load_or_create_key(&key_path) {
+            Ok(k) => k,
+            Err(e) => return eprintln!("astralis: no device key, P2P disabled: {e:#}"),
+        };
+        let emitter = app.clone();
+        let sink: astralis_net::EventSink = Arc::new(move |event| {
+            let _ = emitter.emit("p2p", &event);
+        });
+        match astralis_net::Net::start(state.store.clone(), key, Default::default(), sink).await {
+            Ok(net) => {
+                let _ = state.net.set(Arc::new(net));
+                let _ = app.emit("p2p-ready", ());
+            }
+            Err(e) => eprintln!("astralis: P2P failed to start: {e:#}"),
+        }
+    });
 }

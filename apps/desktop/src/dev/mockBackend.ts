@@ -212,6 +212,15 @@ const handlers: Record<string, (a: Args) => unknown> = {
     if (!img) throw 'attachment not found'
     return img
   },
+  p2p_status: () => ({ ready: true, id: 'mock-device', name: 'This device', peers: [] }),
+  p2p_set_name: () => undefined,
+  p2p_start_pairing: () => '482913',
+  p2p_cancel_pairing: () => undefined,
+  p2p_join: () => { throw 'no Astralis devices found nearby — make sure both are on the same network' },
+  p2p_unpair: () => undefined,
+  live_text: () => undefined,
+  live_presence: () => undefined,
+  live_scene: () => undefined,
   tidy_note: ({ text }) => {
     const body = text.replace(/^\* /gm, '- ').replace(/\n{3,}/g, '\n\n')
     return { body, changes: body === text ? [] : ['Made bullet points consistent', 'Cleaned up spacing'] }

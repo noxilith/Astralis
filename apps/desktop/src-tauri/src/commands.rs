@@ -22,6 +22,8 @@ use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use tauri::State;
 use uuid::Uuid;
 
+use std::sync::Arc;
+
 use crate::SharedState;
 
 type S<'a> = State<'a, SharedState>;
@@ -309,5 +311,101 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         suggest_tags,
         summarize_note,
         tidy_note,
+        p2p_status,
+        p2p_set_name,
+        p2p_start_pairing,
+        p2p_cancel_pairing,
+        p2p_join,
+        p2p_unpair,
+        live_text,
+        live_presence,
+        live_scene,
     ]
+}
+
+// ---- peer-to-peer ----
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct P2pStatus {
+    ready: bool,
+    id: String,
+    name: String,
+    peers: Vec<astralis_net::PeerStatus>,
+}
+
+fn net_of(state: &SharedState) -> Result<Arc<astralis_net::Net>> {
+    state.net.get().cloned().ok_or_else(|| Error::Invalid("peer-to-peer is still starting".into()))
+}
+
+fn net_err(e: impl std::fmt::Display) -> Error {
+    Error::Invalid(e.to_string())
+}
+
+#[tauri::command]
+pub fn p2p_status(state: S<'_>) -> Result<P2pStatus> {
+    Ok(match state.net.get() {
+        Some(net) => P2pStatus { ready: true, id: net.id(), name: net.name(), peers: net.peers() },
+        None => P2pStatus { ready: false, id: String::new(), name: String::new(), peers: vec![] },
+    })
+}
+
+#[tauri::command]
+pub fn p2p_set_name(state: S<'_>, name: String) -> Result<()> {
+    net_of(&state)?.set_name(&name).map_err(net_err)
+}
+
+#[tauri::command]
+pub fn p2p_start_pairing(state: S<'_>) -> Result<String> {
+    Ok(net_of(&state)?.start_pairing())
+}
+
+#[tauri::command]
+pub fn p2p_cancel_pairing(state: S<'_>) -> Result<()> {
+    net_of(&state)?.cancel_pairing();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn p2p_join(state: S<'_>, code: String) -> Result<astralis_net::PeerStatus> {
+    let net = net_of(state.inner())?;
+    net.join(&code, None).await.map_err(net_err)
+}
+
+#[tauri::command]
+pub fn p2p_unpair(state: S<'_>, id: String) -> Result<()> {
+    net_of(&state)?.unpair(&id).map_err(net_err)
+}
+
+/// A local edit while collaborating: save it and send the merged text state to connected devices.
+#[tauri::command]
+pub fn live_text(state: S<'_>, note_id: Uuid, body: String) -> Result<()> {
+    let Some(net) = state.net.get().filter(|n| n.connected_count() > 0) else { return Ok(()) };
+    let text_state = {
+        let s = state.store.lock().unwrap();
+        s.update_note(note_id, NotePatch { title: None, body: Some(body) })?;
+        s.note_text_state(note_id)?
+    };
+    if let Some(st) = text_state {
+        net.broadcast(astralis_net::Live::Text { note_id: note_id.to_string(), state: st });
+    }
+    Ok(())
+}
+
+/// Where the user is: caret/selection in a note, or pointer on a whiteboard.
+#[tauri::command]
+pub fn live_presence(state: S<'_>, note_id: Option<Uuid>, anchor: Option<u32>, head: Option<u32>, pointer: Option<[f64; 2]>) -> Result<()> {
+    if let Some(net) = state.net.get().filter(|n| n.connected_count() > 0) {
+        net.broadcast(astralis_net::Live::Presence { note_id: note_id.map(|u| u.to_string()), anchor, head, pointer });
+    }
+    Ok(())
+}
+
+/// Live whiteboard drawing: the changed elements.
+#[tauri::command]
+pub fn live_scene(state: S<'_>, note_id: Uuid, elements: String) -> Result<()> {
+    if let Some(net) = state.net.get().filter(|n| n.connected_count() > 0) {
+        net.broadcast(astralis_net::Live::Scene { note_id: note_id.to_string(), elements });
+    }
+    Ok(())
 }

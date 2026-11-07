@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Archive,
   ArchiveRestore,
@@ -18,10 +18,12 @@ import {
   Sparkles,
 } from 'lucide-react'
 import type { EditorView } from '@codemirror/view'
-import { api, type Folder, type Id, type Note, type TidyResult } from '../api'
+import { api, p2p, type Folder, type Id, type Note, type TidyResult } from '../api'
 import { MarkdownBar } from '../components/MarkdownBar'
 import { AiMenu } from '../components/AiMenu'
 import { setImageWidth } from '../lib/attachments'
+import { REMOTE_TEXT, SYNCED, connectedCount, throttle, useCollab } from '../lib/collab'
+import { applyRemoteText, type RemoteCaret } from '../lib/remoteCarets'
 import { useApp } from '../context'
 import { Editor } from '../components/Editor'
 import { Markdown } from '../components/Markdown'
@@ -127,7 +129,7 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
     [noteId], // eslint-disable-line react-hooks/exhaustive-deps
   )
 
-  const edit = (patch: { title?: string; body?: string }) => {
+  const edit = (patch: { title?: string; body?: string }, remote = false) => {
     if (!current || !draft.current) return
     draft.current = { ...draft.current, ...patch }
     setCurrent({ ...current, ...patch })
@@ -137,7 +139,67 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
       return
     }
     save.call(current.id, draft.current.title, draft.current.body)
+    // Stream text to collaborators as you type (not edits that came from them).
+    if (!remote && patch.body !== undefined && !current.encrypted && connectedCount() > 0) {
+      sendText(current.id, draft.current.body)
+    }
   }
+
+  // ---- live collaboration ----
+  const collab = useCollab()
+  const sendText = useMemo(() => throttle((id: Id, body: string) => p2p.liveText(id, body).catch(() => {}), 120), [])
+  const sendCaret = useMemo(
+    () => throttle((id: Id | null, anchor: number | null, head: number | null) => p2p.livePresence(id, anchor, head, null).catch(() => {}), 80),
+    [],
+  )
+  // Tell collaborators which note we're in (and that we left it).
+  useEffect(() => {
+    if (!current || connectedCount() === 0) return
+    sendCaret(current.id, 0, 0)
+    return () => sendCaret(null, null, null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current?.id])
+  // Text merged from a collaborator: splice it into the editor without moving our caret.
+  useEffect(() => {
+    const onRemote = (e: Event) => {
+      const { noteId: id, body } = (e as CustomEvent<{ noteId: string; body: string }>).detail
+      if (!current || id !== current.id || !draft.current) return
+      draft.current = { ...draft.current, body }
+      if (viewRef.current) applyRemoteText(viewRef.current, body)
+      else setCurrent((c) => (c ? { ...c, body } : c))
+    }
+    // Background sync touched this note (e.g. title, or edits made while apart): reload it.
+    const onSynced = (e: Event) => {
+      const ids = (e as CustomEvent<string[]>).detail
+      if (!current || !ids.includes(current.id)) return
+      api
+        .getNote(current.id)
+        .then((n) => {
+          if (n.kind === 'note' && viewRef.current && n.body !== draft.current?.body) applyRemoteText(viewRef.current, n.body)
+          if (document.activeElement !== titleRef.current && n.title !== draft.current?.title) {
+            draft.current = { ...(draft.current ?? { id: n.id, title: n.title, body: n.body }), title: n.title }
+          }
+          setCurrent((c) => (c && c.id === n.id ? { ...n, body: draft.current?.body ?? n.body, title: draft.current?.title ?? n.title } : c))
+          publishNote(n)
+        })
+        .catch(() => {})
+    }
+    window.addEventListener(REMOTE_TEXT, onRemote)
+    window.addEventListener(SYNCED, onSynced)
+    return () => {
+      window.removeEventListener(REMOTE_TEXT, onRemote)
+      window.removeEventListener(SYNCED, onSynced)
+    }
+  }, [current, publishNote])
+  const here = current ? collab.presence.filter((p) => p.noteId === current.id) : []
+  const remoteCarets: RemoteCaret[] = useMemo(
+    () =>
+      here
+        .filter((p) => p.head != null)
+        .map((p) => ({ id: p.peer, name: p.name, color: p.color, anchor: p.anchor ?? p.head!, head: p.head! })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [JSON.stringify(here)],
+  )
 
   const replaceCurrent = (n: Note, remountEditor = false) => {
     setCurrent(n)
@@ -198,6 +260,15 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
               {current.encrypted && <Lock size={11} style={{ marginRight: 4 }} />}
               {readOnly ? 'Archived — read only' : `Edited ${relativeTime(current.updatedAt)}`}
             </span>
+            {here.length > 0 && (
+              <div className="collab-avatars" title={`Here now: ${here.map((p) => p.name).join(', ')}`}>
+                {here.map((p) => (
+                  <span key={p.peer} className="collab-avatar" style={{ background: p.color }}>
+                    {p.name.slice(0, 1).toUpperCase()}
+                  </span>
+                ))}
+              </div>
+            )}
             {!readOnly && !isBoard && (
               <button className={'icon-btn' + (preview ? ' active' : '')} title={preview ? 'Edit' : 'Preview'} onClick={() => setPreview((p) => !p)}>
                 {preview ? <Pencil size={16} /> : <Eye size={16} />}
@@ -336,7 +407,9 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
               key={`${current.id}:${editorKey}`}
               value={current.body}
               vaultId={current.vaultId}
-              onChange={(body) => edit({ body })}
+              onChange={(body, remote) => edit({ body }, remote)}
+              onSelection={(anchor, head) => connectedCount() > 0 && sendCaret(current.id, anchor, head)}
+              remoteCarets={remoteCarets}
               onOpenLink={openLink}
               grammar={grammar}
               autoFocus={!current.body && !!current.title}

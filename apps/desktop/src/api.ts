@@ -262,3 +262,30 @@ export const api = {
 }
 
 export const errorMessage = (e: unknown) => (typeof e === 'string' ? e : e instanceof Error ? e.message : String(e))
+
+// ---- peer-to-peer & live collaboration ----
+export interface PeerStatus { id: string; name: string; color: string; trusted: boolean; connected: boolean; nearby: boolean }
+export interface P2pStatus { ready: boolean; id: string; name: string; peers: PeerStatus[] }
+export type Live =
+  | { kind: 'presence'; noteId: string | null; anchor: number | null; head: number | null; pointer: [number, number] | null }
+  | { kind: 'text'; noteId: string; state: number[] }
+  | { kind: 'scene'; noteId: string; elements: string }
+export type P2pEvent =
+  | { type: 'peers'; peers: PeerStatus[] }
+  | { type: 'synced'; peer: string; notes: string[] }
+  | { type: 'live'; peer: string; name: string; color: string; live: Live }
+  | { type: 'remoteText'; peer: string; noteId: string; body: string }
+  | { type: 'paired'; peer: string; name: string }
+
+export const p2p = {
+  status: () => call<P2pStatus>('p2p_status'),
+  setName: (name: string) => call<void>('p2p_set_name', { name }),
+  startPairing: () => call<string>('p2p_start_pairing'),
+  cancelPairing: () => call<void>('p2p_cancel_pairing'),
+  join: (code: string) => call<PeerStatus>('p2p_join', { code }),
+  unpair: (id: string) => call<void>('p2p_unpair', { id }),
+  liveText: (noteId: Id, body: string) => call<void>('live_text', { noteId, body }),
+  livePresence: (noteId: Id | null, anchor: number | null, head: number | null, pointer: [number, number] | null) =>
+    call<void>('live_presence', { noteId, anchor, head, pointer }),
+  liveScene: (noteId: Id, elements: string) => call<void>('live_scene', { noteId, elements }),
+}

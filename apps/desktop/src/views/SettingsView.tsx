@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Cloud } from 'lucide-react'
 import { api, type BrainStatus } from '../api'
+import { Devices } from '../components/Devices'
 
 export function SettingsView({ theme, setTheme }: { theme: 'dark' | 'light'; setTheme: (t: 'dark' | 'light') => void }) {
   const [grammar, setGrammar] = useState(true)
@@ -20,6 +21,14 @@ export function SettingsView({ theme, setTheme }: { theme: 'dark' | 'light'; set
           <button className={'btn' + (theme === 'dark' ? ' primary' : '')} onClick={() => setTheme('dark')}>Dark</button>
           <button className={'btn' + (theme === 'light' ? ' primary' : '')} onClick={() => setTheme('light')}>Light</button>
         </div>
+      </div>
+      <div className="section">
+        <h2>Devices</h2>
+        <p className="small muted" style={{ marginTop: -6 }}>
+          Pair your devices to sync them directly — no server, end-to-end encrypted. While both are open you can
+          edit the same note or whiteboard together and see each other's cursor.
+        </p>
+        <Devices />
       </div>
       <div className="section">
         <h2>Connected drives</h2>
