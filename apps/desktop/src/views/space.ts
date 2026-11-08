@@ -46,6 +46,9 @@ interface Body extends GraphNode {
   speed: number
   /** Lone stars: a fixed place in the galaxy's own frame. */
   home: V3
+  /** The plane it orbits in (planets and moons each have their own tilt). */
+  ou: V3
+  ov: V3
   twinkle: number
   // Each frame:
   local: V3
@@ -113,6 +116,18 @@ const add = (a: V3, b: V3): V3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 const scale = (a: V3, k: number): V3 => [a[0] * k, a[1] * k, a[2] * k]
 const len = (a: V3) => Math.hypot(a[0], a[1], a[2])
 const norm = (a: V3): V3 => scale(a, 1 / (len(a) || 1))
+const dot = (a: V3, b: V3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+/** Rotates `x` about the unit axis `k` by `t` radians (Rodrigues). */
+const rotate = (x: V3, k: V3, t: number): V3 => {
+  const c = Math.cos(t)
+  const s = Math.sin(t)
+  return add(add(scale(x, c), scale(cross(k, x), s)), scale(k, dot(k, x) * (1 - c)))
+}
+/** A plane (u, v) tipped by `inclination` about a line through it at angle `node`. */
+const tilt = (u: V3, v: V3, inclination: number, node: number): [V3, V3] => {
+  const k = norm(add(scale(u, Math.cos(node)), scale(v, Math.sin(node))))
+  return [rotate(u, k, inclination), rotate(v, k, inclination)]
+}
 const cross = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 
 /** Deterministic randomness per seed, so a vault always looks the same. */
@@ -228,6 +243,8 @@ function buildGalaxy(input: GalaxyInput, index: number): Galaxy {
     phase: r() * TAU,
     speed: 0,
     home: [0, 0, 0],
+    ou: [1, 0, 0],
+    ov: [0, 0, 1],
     twinkle: 0.6 + r() * 1.8,
     local: [0, 0, 0],
     world: [0, 0, 0],
@@ -337,10 +354,15 @@ function buildGalaxy(input: GalaxyInput, index: number): Galaxy {
       ring++
     }
     const ext = rings.length ? rings[rings.length - 1] + Math.max(...planets.map((p) => reach.get(p)!)) : sun.r * 3
-    // Each system orbits in its own plane, roughly level with the disc.
-    const n = norm([gauss(r) * 0.3, 1, gauss(r) * 0.3])
+    // Each system has its own plane, tipped well away from the disc's; within it every planet
+    // orbits at its own small tilt, and moons at bigger ones, so a system has depth.
+    const n = norm([gauss(r) * 0.6, 1, gauss(r) * 0.6])
     const u = norm(cross(n, [0, 0, 1]))
     const v = cross(n, u)
+    for (const p of planets) {
+      ;[p.ou, p.ov] = tilt(u, v, clamp(gauss(r) * 0.2, -0.55, 0.55), r() * TAU)
+      for (const m of moonsOf.get(p) ?? []) [m.ou, m.ov] = tilt(p.ou, p.ov, clamp(gauss(r) * 0.5, -1.2, 1.2), r() * TAU)
+    }
     const sys: System = {
       galaxy: g,
       sun,
@@ -384,7 +406,8 @@ function buildGalaxy(input: GalaxyInput, index: number): Galaxy {
     const t = (k + 0.5) / Math.max(1, sysCount)
     const d = R * (k === 0 ? 0 : 0.14 + 0.72 * Math.sqrt(t))
     const a = ((k % arms) * TAU) / arms + wind * (d / R) + gauss(r) * 0.25
-    s.center = [Math.cos(a) * d, gauss(r) * R * 0.015, Math.sin(a) * d]
+    const lift = R * (0.025 + 0.08 * Math.exp(-((d / R) ** 2) * 5))
+    s.center = [Math.cos(a) * d, k === 0 ? 0 : gauss(r) * lift, Math.sin(a) * d]
   })
   for (let pass = 0; pass < 40; pass++) {
     let moved = false
@@ -423,7 +446,7 @@ function buildGalaxy(input: GalaxyInput, index: number): Galaxy {
     const t = ((k % perArm) + 0.5) / perArm
     const d = g.R * (0.1 + 0.88 * Math.pow(t, 0.9)) * (1 + gauss(r) * 0.05 * scatter)
     const a = (arm * TAU) / arms + wind * (d / g.R) + gauss(r) * (0.18 + 0.12 * (1 - t)) * scatter
-    const thick = g.R * (0.012 + 0.05 * Math.exp(-((d / g.R) ** 2) * 6))
+    const thick = g.R * (0.025 + 0.09 * Math.exp(-((d / g.R) ** 2) * 6))
     s.home = [Math.cos(a) * d + gauss(r) * g.R * 0.03, gauss(r) * thick, Math.sin(a) * d + gauss(r) * g.R * 0.03]
     s.r = 0.9 + Math.sqrt(s.degree) * 0.3 + (s.pinned ? 0.6 : 0)
     // Untagged stars take the galaxy's colours: gold-white near the core, its own hue along
@@ -571,7 +594,7 @@ export function createSpace(el: HTMLCanvasElement, inputs: GalaxyInput[], onOpen
             const a = b.phase + time * b.speed
             const c = Math.cos(a) * b.orbit
             const sn = Math.sin(a) * b.orbit
-            b.local = [host[0] + s.u[0] * c + s.v[0] * sn, host[1] + s.u[1] * c + s.v[1] * sn, host[2] + s.u[2] * c + s.v[2] * sn]
+            b.local = [host[0] + b.ou[0] * c + b.ov[0] * sn, host[1] + b.ou[1] * c + b.ov[1] * sn, host[2] + b.ou[2] * c + b.ov[2] * sn]
           }
         }
         s.world = toWorld(g, s.center)
@@ -684,18 +707,25 @@ export function createSpace(el: HTMLCanvasElement, inputs: GalaxyInput[], onOpen
       const g = s.galaxy
       const c = s.center
       ctx.lineWidth = 1
-      for (const R of s.rings) {
-        const path = new Path2D()
-        for (let k = 0; k <= 72; k++) {
-          const a = (k / 72) * TAU
-          const p = toWorld(g, [c[0] + (s.u[0] * Math.cos(a) + s.v[0] * Math.sin(a)) * R, c[1] + (s.u[1] * Math.cos(a) + s.v[1] * Math.sin(a)) * R, c[2] + (s.u[2] * Math.cos(a) + s.v[2] * Math.sin(a)) * R])
-          const q = project(p)
+      // Each planet's own tilted orbit (and its moons', once you're right up close).
+      const steps = Math.round(clamp(s.extPx / 4, 24, 72))
+      const path = new Path2D()
+      const ring = (center: V3, ou: V3, ov: V3, R: number) => {
+        for (let k = 0; k <= steps; k++) {
+          const a = (k / steps) * TAU
+          const ca = Math.cos(a) * R
+          const sa = Math.sin(a) * R
+          const q = project(toWorld(g, [center[0] + ou[0] * ca + ov[0] * sa, center[1] + ou[1] * ca + ov[1] * sa, center[2] + ou[2] * ca + ov[2] * sa]))
           if (k === 0) path.moveTo(q.x, q.y)
           else path.lineTo(q.x, q.y)
         }
-        ctx.strokeStyle = `hsla(${g.hue}, 60%, 75%, ${(dimAll ? 0.05 : 0.11) * strength})`
-        ctx.stroke(path)
       }
+      for (const b of s.bodies) {
+        if (b.role === 'planet') ring(c, b.ou, b.ov, b.orbit)
+        else if (b.role === 'moon' && s.extPx > 260) ring(b.parent!.local, b.ou, b.ov, b.orbit)
+      }
+      ctx.strokeStyle = `hsla(${g.hue}, 60%, 75%, ${(dimAll ? 0.04 : 0.09) * strength})`
+      ctx.stroke(path)
       // Links between its notes.
       for (const [a, b] of s.links) {
         const on = hover && (a === hover || b === hover)
