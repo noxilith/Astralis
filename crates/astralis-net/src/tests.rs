@@ -44,13 +44,16 @@ async fn pair_sync_and_collaborate_live() {
     let a = device("Laptop").await;
     let b = device("Desktop").await;
 
-    // A note on A before pairing.
-    let n = a
-        .store
-        .lock()
-        .unwrap()
-        .create_note(NewNote { title: "Shared".into(), body: "hello".into(), ..Default::default() })
-        .unwrap();
+    // Before pairing: a note in A's own vault, and a "Team" vault with a note in it.
+    let (private, team, n) = {
+        let mut s = a.store.lock().unwrap();
+        let private = s.create_note(NewNote { title: "Private".into(), body: "mine".into(), ..Default::default() }).unwrap();
+        let team = s.create_vault("Team", None).unwrap();
+        let n = s
+            .create_note(NewNote { title: "Shared".into(), body: "hello".into(), vault_id: Some(team.id), ..Default::default() })
+            .unwrap();
+        (private, team, n)
+    };
 
     // Wrong code is rejected; the right one pairs both ways.
     let code = a.net.start_pairing();
@@ -61,8 +64,18 @@ async fn pair_sync_and_collaborate_live() {
     assert!(b.net.peers().iter().any(|p| p.id == a.net.id() && p.trusted));
     eventually("A trusts B", || a.net.peers().iter().any(|p| p.id == b.net.id() && p.trusted && p.connected)).await;
 
-    // Initial sync: B receives A's note.
+    // Paired, but nothing is shared yet: nothing moves.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(b.store.lock().unwrap().get_note(n.id).is_err());
+
+    // A shares Team: it shows up on B as its own vault; A's private note never does.
+    a.store.lock().unwrap().share_vault(team.id, &b.net.id()).unwrap();
+    a.net.shares_changed(&b.net.id());
     eventually("note synced to B", || b.store.lock().unwrap().get_note(n.id).is_ok()).await;
+    let b_vaults = b.store.lock().unwrap().list_vaults().unwrap();
+    assert_eq!(b_vaults.len(), 2, "B's own vault plus Team");
+    assert_eq!(b_vaults.iter().find(|v| v.id == team.id).unwrap().owner.as_deref(), Some(a.net.id().as_str()));
+    assert!(b.store.lock().unwrap().get_note(private.id).is_err());
     assert_eq!(b.store.lock().unwrap().get_note(n.id).unwrap().body, "hello");
 
     // Later edits flow automatically, both ways.
@@ -73,12 +86,15 @@ async fn pair_sync_and_collaborate_live() {
         .unwrap();
     eventually("title synced to A", || a.store.lock().unwrap().get_note(n.id).unwrap().title == "Shared (edited on B)").await;
 
-    // Live text: A types, sends its CRDT state; B merges it immediately.
-    a.store.lock().unwrap().update_note(n.id, NotePatch { body: Some("hello world".into()), ..Default::default() }).unwrap();
-    let state = a.store.lock().unwrap().note_text_state(n.id).unwrap().unwrap();
-    a.net.broadcast(Live::Text { note_id: n.id.to_string(), state });
+    // Live text: A's editor types and sends the update; B merges it immediately.
+    let update = {
+        let s = a.store.lock().unwrap();
+        s.update_note(n.id, NotePatch { body: Some("hello world".into()), ..Default::default() }).unwrap();
+        s.note_crdt(n.id).unwrap()
+    };
+    a.net.broadcast(Live::Update { note_id: n.id.to_string(), update });
     eventually("live text on B", || b.store.lock().unwrap().get_note(n.id).unwrap().body == "hello world").await;
-    assert!(b.events.lock().unwrap().iter().any(|e| matches!(e, NetEvent::RemoteText { body, .. } if body == "hello world")));
+    assert!(b.events.lock().unwrap().iter().any(|e| matches!(e, NetEvent::Live { live: Live::Update { .. }, .. })));
 
     // Presence: B's caret shows up on A with B's name.
     b.net.broadcast(Live::Presence { note_id: Some(n.id.to_string()), anchor: Some(3), head: Some(3), pointer: None });
@@ -89,9 +105,52 @@ async fn pair_sync_and_collaborate_live() {
     })
     .await;
 
-    // Unpairing disconnects.
+    // B picks a color and a new name: A sees both right away, and remembers them.
+    b.net.set_color("#FF0000").unwrap();
+    assert!(b.net.set_color("red; background: url(x)").is_err(), "only hex colors");
+    b.net.set_name("Noxi").unwrap();
+    eventually("profile on A", || a.net.peers().iter().any(|p| p.id == b.net.id() && p.color == "#ff0000" && p.name == "Noxi")).await;
+    let saved = a.store.lock().unwrap().get_setting("p2p.trusted").unwrap().unwrap();
+    assert!(saved.contains("#ff0000"), "kept for when B is offline");
+
+    // A stops sharing: B's copy disappears (A's stays). Sharing again brings it back.
+    a.store.lock().unwrap().unshare_vault(team.id, &b.net.id()).unwrap();
+    a.net.shares_changed(&b.net.id());
+    eventually("B lost Team", || b.store.lock().unwrap().get_vault(team.id).is_err()).await;
+    assert!(a.store.lock().unwrap().get_note(n.id).is_ok());
+    a.store.lock().unwrap().share_vault(team.id, &b.net.id()).unwrap();
+    a.net.shares_changed(&b.net.id());
+    eventually("Team back on B", || b.store.lock().unwrap().get_note(n.id).is_ok()).await;
+
+    // B leaves: gone on B, A stops sharing with B.
+    b.store.lock().unwrap().leave_vault(team.id).unwrap();
+    b.net.shares_changed(&a.net.id());
+    eventually("A sees B left", || a.store.lock().unwrap().get_vault(team.id).unwrap().shared_with.is_empty()).await;
+    assert!(b.store.lock().unwrap().get_vault(team.id).is_err());
+    a.store.lock().unwrap().share_vault(team.id, &b.net.id()).unwrap();
+    a.net.shares_changed(&b.net.id());
+    eventually("Team shared again", || b.store.lock().unwrap().get_note(n.id).is_ok()).await;
+
+    // A live edit of A's private note never reaches B.
+    let update = a.store.lock().unwrap().note_crdt(private.id).unwrap();
+    a.net.broadcast(Live::Update { note_id: private.id.to_string(), update });
+
+    // Unpairing hangs up, and the other device forgets us too.
     b.net.unpair(&a.net.id()).unwrap();
+    // B loses the vault A shared; A keeps it.
+    assert!(b.store.lock().unwrap().get_vault(team.id).is_err());
+    assert_eq!(b.store.lock().unwrap().list_vaults().unwrap().len(), 1);
+    assert_eq!(a.store.lock().unwrap().get_note(n.id).unwrap().body, "hello world");
     assert!(!b.net.peers().iter().any(|p| p.id == a.net.id() && p.trusted));
+    eventually("A forgets B", || !a.net.peers().iter().any(|p| p.id == b.net.id() && (p.trusted || p.connected))).await;
+    eventually("B disconnected", || b.net.connected_count() == 0).await;
+
+    // Nothing flows any more, either way.
+    let from_b = b.store.lock().unwrap().create_note(NewNote { title: "after unpair".into(), ..Default::default() }).unwrap();
+    a.store.lock().unwrap().update_note(n.id, NotePatch { title: Some("A only".into()), ..Default::default() }).unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert!(a.store.lock().unwrap().get_note(from_b.id).is_err());
+    assert!(b.store.lock().unwrap().get_note(n.id).is_err());
 }
 
 #[tokio::test]
@@ -168,11 +227,18 @@ async fn pair_and_sync_across_the_internet() {
     assert!(a.wait_online(Duration::from_secs(20)).await, "A couldn't reach the relay");
     assert!(b.wait_online(Duration::from_secs(20)).await, "B couldn't reach the relay");
 
-    let n = sa.lock().unwrap().create_note(NewNote { title: "Far away".into(), ..Default::default() }).unwrap();
+    let (vault, n) = {
+        let mut s = sa.lock().unwrap();
+        let v = s.create_vault("Shared", None).unwrap();
+        let n = s.create_note(NewNote { title: "Far away".into(), vault_id: Some(v.id), ..Default::default() }).unwrap();
+        (v.id, n)
+    };
     let code = a.start_pairing();
     // Only the invite text crosses over — no addresses.
     let peer = b.join(&a.invite(&code), None).await.unwrap();
     assert_eq!(peer.name, "Home");
+    sa.lock().unwrap().share_vault(vault, &b.id()).unwrap();
+    a.shares_changed(&b.id());
     for _ in 0..200 {
         if sb.lock().unwrap().get_note(n.id).is_ok() {
             return;
@@ -180,4 +246,58 @@ async fn pair_and_sync_across_the_internet() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("note didn't sync across the internet");
+}
+
+#[tokio::test]
+async fn invited_by_email_joins_a_cloud_vault_without_pairing() {
+    let a = device("Owner").await;
+    let b = device("Friend").await;
+    let (vault, n) = {
+        let mut s = a.store.lock().unwrap();
+        let v = s.create_vault("Trip", None).unwrap();
+        s.set_cloud_vault(&astralis_core::cloud::CloudVault {
+            vault_id: v.id,
+            provider: "google-drive".into(),
+            folder_id: "folder-1".into(),
+            sync_key: vec![7; 32],
+            owned: true,
+            uploaded_vv: Default::default(),
+        })
+        .unwrap();
+        s.add_cloud_invite(v.id, "friend@example.com", "s3cret").unwrap();
+        let n = s.create_note(NewNote { title: "Packing".into(), body: "tent".into(), vault_id: Some(v.id), ..Default::default() }).unwrap();
+        (v.id, n)
+    };
+    let private = a.store.lock().unwrap().create_note(NewNote { title: "Private".into(), ..Default::default() }).unwrap();
+
+    // A wrong secret gets nowhere (and leaves nothing behind).
+    let bad = JoinRequest { vault, email: "friend@example.com".into(), secret: "nope".into() };
+    assert!(b.net.join_vault_at(&a.net.id(), bad, Some(a.net.addr())).await.is_err());
+    assert!(b.store.lock().unwrap().vault_owner(vault).unwrap().is_none());
+
+    // The right one: B gets the vault (and where it lives on the drive), not A's other vaults,
+    // and isn't paired with A.
+    let ok = JoinRequest { vault, email: "Friend@Example.com".into(), secret: "s3cret".into() };
+    b.net.join_vault_at(&a.net.id(), ok.clone(), Some(a.net.addr())).await.unwrap();
+    eventually("vault on B", || b.store.lock().unwrap().get_note(n.id).is_ok()).await;
+    eventually("drive info on B", || b.store.lock().unwrap().cloud_vault(vault).unwrap().is_some_and(|c| c.folder_id == "folder-1" && !c.owned && c.sync_key == vec![7; 32])).await;
+    assert!(b.store.lock().unwrap().get_note(private.id).is_err());
+    assert!(!a.net.peers().iter().any(|p| p.id == b.net.id() && p.trusted), "joining isn't pairing");
+    assert_eq!(a.store.lock().unwrap().cloud_invites(vault).unwrap()[0].accepted_by.as_deref(), Some(b.net.id().as_str()));
+
+    // Edits flow both ways.
+    b.store.lock().unwrap().update_note(n.id, NotePatch { title: Some("Packing list".into()), ..Default::default() }).unwrap();
+    eventually("B's edit on A", || a.store.lock().unwrap().get_note(n.id).unwrap().title == "Packing list").await;
+
+    // The invite can't be reused by someone else.
+    let c = device("Stranger").await;
+    assert!(c.net.join_vault_at(&a.net.id(), ok, Some(a.net.addr())).await.is_err());
+
+    // A takes B out: B's copy goes; A's stays.
+    let device = a.store.lock().unwrap().remove_cloud_invite(vault, "friend@example.com").unwrap();
+    assert_eq!(device.as_deref(), Some(b.net.id().as_str()));
+    a.net.shares_changed(&b.net.id());
+    eventually("B lost the vault", || b.store.lock().unwrap().get_vault(vault).is_err()).await;
+    assert!(b.store.lock().unwrap().cloud_vault(vault).unwrap().is_none());
+    assert!(a.store.lock().unwrap().get_note(n.id).is_ok());
 }

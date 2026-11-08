@@ -2,13 +2,14 @@
 // (`./run.sh ui`). Only loaded in dev when Tauri isn't present. Not a reimplementation:
 // just enough to click around the interface. Encrypted vaults accept any password.
 import { mockIPC } from '@tauri-apps/api/mocks'
+import * as Y from 'yjs'
 import type { CalEvent, Folder, Note, NoteKind, Planner, Task, Template, Vault } from '../api'
 
 type Args = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
 
 const now = () => Date.now()
 const id = () => crypto.randomUUID()
-const vaults: Vault[] = [{ id: id(), name: 'Personal', createdAt: now(), encrypted: false, unlocked: true, noteCount: 0 }]
+const vaults: Vault[] = [{ id: id(), name: 'Personal', createdAt: now(), encrypted: false, unlocked: true, noteCount: 0, owner: null, sharedWith: [], cloud: null }]
 const notes: Note[] = []
 const folders: Folder[] = []
 const tasks: Task[] = []
@@ -20,6 +21,21 @@ const templates: Template[] = [
   { id: id(), name: 'Meeting Notes', title: 'Meeting — {{date}}', body: '## Agenda\n- \n\n## Notes\n\n## Action Items\n- [ ] ', builtin: true, createdAt: now(), updatedAt: now() },
   { id: id(), name: 'Daily Journal', title: 'Journal — {{date}}', body: '## Today\n\n## Reflection\n', builtin: true, createdAt: now(), updatedAt: now() },
 ]
+
+const mockMe = { name: "noxilith", color: "#8b7bff" }
+const google: { clientId: string | null; email: string | null } = { clientId: null, email: null }
+const invites = new Map<string, { email: string; acceptedBy: string | null }[]>()
+const docs = new Map<string, Y.Doc>()
+const docFor = (noteId: string) => {
+  const n = notes.find((x) => x.id === noteId)!
+  let d = docs.get(noteId)
+  if (!d || d.getText('body').toString() !== n.body) {
+    d = new Y.Doc()
+    d.getText('body').insert(0, n.body)
+    docs.set(noteId, d)
+  }
+  return d
+}
 
 const vaultOf = (v?: string | null) => v ?? vaults[0].id
 const note = (
@@ -136,7 +152,7 @@ const handlers: Record<string, (a: Args) => unknown> = {
   list_vaults: () => vaults.map((v) => ({ ...v, noteCount: notes.filter((n) => n.vaultId === v.id && !n.archivedAt).length })),
   default_vault: () => vaults[0].id,
   create_vault: ({ name, password }) => {
-    const v: Vault = { id: id(), name, createdAt: now(), encrypted: !!password, unlocked: true, noteCount: 0 }
+    const v: Vault = { id: id(), name, createdAt: now(), encrypted: !!password, unlocked: true, noteCount: 0, owner: null, sharedWith: [], cloud: null }
     vaults.push(v)
     return v
   },
@@ -212,13 +228,44 @@ const handlers: Record<string, (a: Args) => unknown> = {
     if (!img) throw 'attachment not found'
     return img
   },
-  p2p_status: () => ({ ready: true, id: 'mock-device', name: 'This device', peers: [] }),
-  p2p_set_name: () => undefined,
+  p2p_status: () => ({ ready: true, id: 'mock-device', name: mockMe.name, color: mockMe.color, peers: [] }),
+  p2p_set_name: ({ name }) => void (mockMe.name = name),
+  // Google Drive (pretend): set a client, "connect", make cloud vaults, invite.
+  google_status: () => ({ configured: !!google.clientId, builtin: false, clientId: google.clientId, email: google.email }),
+  google_set_client: ({ clientId }) => void (google.clientId = clientId),
+  google_connect: () => (google.email = 'you@gmail.com'),
+  google_disconnect: () => void (google.email = null),
+  cloud_create_vault: ({ name }) => {
+    const v: Vault = { id: id(), name, createdAt: now(), encrypted: false, unlocked: true, noteCount: 0, owner: null, sharedWith: [], cloud: 'google-drive' }
+    vaults.push(v)
+    return v
+  },
+  cloud_invites: ({ vaultId }) => invites.get(vaultId) ?? [],
+  cloud_invite: ({ vaultId, email }) => void invites.set(vaultId, [...(invites.get(vaultId) ?? []), { email, acceptedBy: null }]),
+  cloud_uninvite: ({ vaultId, email }) => void invites.set(vaultId, (invites.get(vaultId) ?? []).filter((i: { email: string }) => i.email !== email)),
+  cloud_join: () => 'Shared vault',
+  cloud_sync_now: () => undefined,
+  open_url: ({ url }) => void window.open(url, '_blank'),
+  vault_share: ({ vaultId, peer }) => { const v = find(vaults, vaultId); v.sharedWith = [...new Set([...v.sharedWith, peer])]; return v },
+  vault_unshare: ({ vaultId, peer }) => { const v = find(vaults, vaultId); v.sharedWith = v.sharedWith.filter((p: string) => p !== peer); return v },
+  vault_leave: ({ vaultId }) => void vaults.splice(vaults.indexOf(find(vaults, vaultId)), 1),
+  p2p_set_color: ({ color }) => void (mockMe.color = color),
   p2p_start_pairing: () => ({ code: '482913', invite: 'astralis:mockdeviceid:482913' }),
   p2p_cancel_pairing: () => undefined,
   p2p_join: () => { throw 'no Astralis devices found nearby — make sure both are on the same network' },
   p2p_unpair: () => undefined,
-  live_text: () => undefined,
+  // Text CRDTs, rebuilt from the body when it was changed outside the editor.
+  note_crdt: ({ noteId }) => Array.from(Y.encodeStateAsUpdate(docFor(noteId))),
+  note_edit: ({ noteId, update }) => {
+    const d = docFor(noteId)
+    Y.applyUpdate(d, Uint8Array.from(update))
+    const n = find(notes, noteId)
+    const body = d.getText('body').toString()
+    if (body === n.body) return null
+    Object.assign(n, { body, updatedAt: now() })
+    return body
+  },
+  live_awareness: () => undefined,
   live_presence: () => undefined,
   live_scene: () => undefined,
   tidy_note: ({ text }) => {

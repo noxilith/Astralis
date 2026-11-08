@@ -3,6 +3,7 @@
 pub mod ai;
 pub mod attachments;
 pub mod calendar;
+pub mod cloud;
 pub mod error;
 pub mod folders;
 pub mod grammar;

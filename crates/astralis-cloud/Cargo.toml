@@ -1,0 +1,17 @@
+[package]
+name = "astralis-cloud"
+version = "0.1.0"
+edition = "2024"
+description = "Astralis cloud vaults: Google Drive sign-in, drive client, and end-to-end encrypted sync"
+
+[dependencies]
+anyhow = "1.0.104"
+astralis-core = { version = "0.1.0", path = "../astralis-core" }
+base64 = "0.23.1"
+reqwest = { version = "0.13", features = ["json", "form", "query"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.10"
+tokio = { version = "1.54.1", features = ["full"] }
+tracing = "0.1.44"
+uuid = { version = "1.29.1", features = ["serde", "v7"] }

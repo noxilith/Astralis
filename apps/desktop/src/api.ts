@@ -134,7 +134,17 @@ export interface Planner {
 }
 export interface PlannerInput { name: string; description?: string; color?: string | null }
 
-export interface Vault { id: Id; name: string; createdAt: Ms; encrypted: boolean; unlocked: boolean; noteCount: number }
+export interface Vault {
+  id: Id; name: string; createdAt: Ms; encrypted: boolean; unlocked: boolean; noteCount: number
+  /** The paired device that shared this vault with us (null = ours). */
+  owner: string | null
+  /** Devices we share it with. */
+  sharedWith: string[]
+  /** The drive it lives on ("google-drive"), if it's a cloud vault. */
+  cloud: string | null
+}
+export interface GoogleStatus { configured: boolean; builtin: boolean; clientId: string | null; email: string | null }
+export interface CloudInvite { email: string; acceptedBy: string | null }
 
 export interface GrammarFix { kind: 'replace' | 'insert' | 'remove'; text: string }
 export interface GrammarIssue { start: number; end: number; message: string; kind: string; fixes: GrammarFix[] }
@@ -240,6 +250,23 @@ export const api = {
   changeVaultPassword: (id: Id, old: string, newPassword: string) =>
     call<void>('change_vault_password', { id, old, new: newPassword }),
   deleteVault: (id: Id, password: string | null) => call<void>('delete_vault', { id, password }),
+  shareVault: (vaultId: Id, peer: string) => call<Vault>('vault_share', { vaultId, peer }),
+  unshareVault: (vaultId: Id, peer: string) => call<Vault>('vault_unshare', { vaultId, peer }),
+  leaveVault: (vaultId: Id) => call<void>('vault_leave', { vaultId }),
+
+  // Google Drive & cloud vaults
+  googleStatus: () => call<GoogleStatus>('google_status'),
+  googleSetClient: (clientId: string, clientSecret: string) => call<void>('google_set_client', { clientId, clientSecret }),
+  googleConnect: () => call<string>('google_connect'),
+  googleDisconnect: () => call<void>('google_disconnect'),
+  createCloudVault: (name: string) => call<Vault>('cloud_create_vault', { name }),
+  cloudInvites: (vaultId: Id) => call<CloudInvite[]>('cloud_invites', { vaultId }),
+  cloudInvite: (vaultId: Id, email: string) => call<void>('cloud_invite', { vaultId, email }),
+  cloudUninvite: (vaultId: Id, email: string) => call<void>('cloud_uninvite', { vaultId, email }),
+  /** Opens the Google Picker to choose a shared vault folder; returns the vault's name. */
+  cloudJoin: () => call<string>('cloud_join'),
+  cloudSyncNow: () => call<void>('cloud_sync_now'),
+  openUrl: (url: string) => call<void>('open_url', { url }),
   moveNoteToVault: (noteId: Id, vaultId: Id) => call<Note>('move_note_to_vault', { noteId, vaultId }),
 
   // settings
@@ -265,26 +292,32 @@ export const errorMessage = (e: unknown) => (typeof e === 'string' ? e : e insta
 
 // ---- peer-to-peer & live collaboration ----
 export interface PeerStatus { id: string; name: string; color: string; trusted: boolean; connected: boolean; nearby: boolean }
-export interface P2pStatus { ready: boolean; id: string; name: string; peers: PeerStatus[] }
+export interface P2pStatus { ready: boolean; id: string; name: string; color: string; peers: PeerStatus[] }
 export type Live =
   | { kind: 'presence'; noteId: string | null; anchor: number | null; head: number | null; pointer: [number, number] | null }
-  | { kind: 'text'; noteId: string; state: number[] }
+  | { kind: 'update'; noteId: string; update: number[] }
+  | { kind: 'awareness'; noteId: string; update: number[] }
   | { kind: 'scene'; noteId: string; elements: string }
 export type P2pEvent =
   | { type: 'peers'; peers: PeerStatus[] }
   | { type: 'synced'; peer: string; notes: string[] }
   | { type: 'live'; peer: string; name: string; color: string; live: Live }
-  | { type: 'remoteText'; peer: string; noteId: string; body: string }
   | { type: 'paired'; peer: string; name: string }
+  | { type: 'vaultsChanged' }
 
 export const p2p = {
   status: () => call<P2pStatus>('p2p_status'),
   setName: (name: string) => call<void>('p2p_set_name', { name }),
+  setColor: (color: string) => call<void>('p2p_set_color', { color }),
   startPairing: () => call<{ code: string; invite: string }>('p2p_start_pairing'),
   cancelPairing: () => call<void>('p2p_cancel_pairing'),
   join: (code: string) => call<PeerStatus>('p2p_join', { code }),
   unpair: (id: string) => call<void>('p2p_unpair', { id }),
-  liveText: (noteId: Id, body: string) => call<void>('live_text', { noteId, body }),
+  /** The note's text CRDT (a Yjs update) for the editor. */
+  noteCrdt: (noteId: Id) => call<number[]>('note_crdt', { noteId }),
+  /** Stores an editor edit (a Yjs update) and sends it to collaborators; returns the new text if it changed. */
+  noteEdit: (noteId: Id, update: Uint8Array) => call<string | null>('note_edit', { noteId, update: Array.from(update) }),
+  liveAwareness: (noteId: Id, update: Uint8Array) => call<void>('live_awareness', { noteId, update: Array.from(update) }),
   livePresence: (noteId: Id | null, anchor: number | null, head: number | null, pointer: [number, number] | null) =>
     call<void>('live_presence', { noteId, anchor, head, pointer }),
   liveScene: (noteId: Id, elements: string) => call<void>('live_scene', { noteId, elements }),

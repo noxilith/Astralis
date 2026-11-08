@@ -1,3 +1,4 @@
+mod cloud;
 mod commands;
 
 use std::path::PathBuf;
@@ -19,6 +20,8 @@ pub struct AppState {
     pub net: std::sync::OnceLock<Arc<astralis_net::Net>>,
     pub brain: Mutex<Brain>,
     pub grammar: Mutex<Option<Grammar>>,
+    /// Google Drive sign-in (cloud vaults).
+    pub cloud: cloud::Cloud,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -114,10 +117,12 @@ pub fn run() {
                 net: std::sync::OnceLock::new(),
                 brain: Mutex::new(brain),
                 grammar: Mutex::new(None),
+                cloud: Default::default(),
             });
             app.manage(state.clone());
             spawn_reminder_loop(app.handle().clone(), state.clone());
             spawn_brain_loop(app.handle().clone(), state.clone());
+            cloud::spawn_sync_loop(app.handle().clone(), state.clone());
             spawn_p2p(app.handle().clone(), state, data_dir.join("device.key"));
             Ok(())
         })

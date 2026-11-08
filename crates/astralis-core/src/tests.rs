@@ -14,6 +14,7 @@ use crate::tasks::{
     Frequency, NewTask, Recurrence, ReminderKind, TaskFilter, TaskPatch, TaskStatus,
 };
 use crate::templates::TemplateInput;
+use crate::sync::{ShareRole, SqlValue, Tombstone};
 use crate::*;
 
 const DAY: i64 = 86_400_000;
@@ -1509,16 +1510,24 @@ fn sync_encrypted_vaults_stay_encrypted_in_transit() {
 }
 
 #[test]
-fn live_text_states_merge_into_notes() {
+fn live_editor_updates_merge_into_notes() {
     let a = store();
     let b = store();
     let n = a.create_note(NewNote { title: "Live".into(), body: "abc".into(), ..Default::default() }).unwrap();
     sync_pair(&a, &b);
-    a.update_note(n.id, NotePatch { body: Some("abcd".into()), ..Default::default() }).unwrap();
+    // The editor on A types (its own Yjs client); the update is stored and stamped for sync.
+    let base = a.note_crdt(n.id).unwrap();
+    let typed = crate::sync::crdt_set_text_for_tests(&base, "abcd", 777);
+    assert_eq!(a.apply_note_update(n.id, &typed, true).unwrap().as_deref(), Some("abcd"));
+    assert_eq!(a.get_note(n.id).unwrap().body, "abcd");
+    // Meanwhile B edited; A's live update folds in without losing B's text.
     b.update_note(n.id, NotePatch { body: Some("xabc".into()), ..Default::default() }).unwrap();
-    let state = a.note_text_state(n.id).unwrap().unwrap();
-    assert_eq!(b.merge_note_text(n.id, &state).unwrap().as_deref(), Some("xabcd"));
-    assert_eq!(b.merge_note_text(n.id, &state).unwrap(), None, "no change the second time");
+    assert_eq!(b.apply_note_update(n.id, &typed, false).unwrap().as_deref(), Some("xabcd"));
+    assert_eq!(b.apply_note_update(n.id, &typed, false).unwrap(), None, "no change the second time");
+    // And sync agrees.
+    sync_pair(&a, &b);
+    assert_eq!(a.get_note(n.id).unwrap().body, "xabcd");
+    assert_eq!(b.get_note(n.id).unwrap().body, "xabcd");
 }
 
 #[test]
@@ -1540,8 +1549,8 @@ fn sync_merges_concurrent_edits_in_encrypted_notes() {
     assert!(!crdt.windows(5).any(|w| w == b"three"));
     // Live text works in encrypted vaults too.
     a.update_note(n.id, NotePatch { body: Some("zero\none\ntwo\nthree\nfour\n".into()), ..Default::default() }).unwrap();
-    let state = a.note_text_state(n.id).unwrap().unwrap();
-    assert_eq!(b.merge_note_text(n.id, &state).unwrap().as_deref(), Some("zero\none\ntwo\nthree\nfour\n"));
+    let state = a.note_crdt(n.id).unwrap();
+    assert_eq!(b.apply_note_update(n.id, &state, false).unwrap().as_deref(), Some("zero\none\ntwo\nthree\nfour\n"));
 }
 
 #[test]
@@ -1570,31 +1579,254 @@ fn sync_merges_whiteboards_by_element() {
 }
 
 #[test]
-fn pairing_fresh_devices_leaves_one_personal_vault() {
-    // Both empty: they agree on one.
-    let a = store();
-    let b = store();
-    sync_pair(&a, &b);
-    sync_pair(&a, &b);
-    let (va, vb) = (a.list_vaults().unwrap(), b.list_vaults().unwrap());
-    assert_eq!(va.len(), 1, "{va:?}");
-    assert_eq!(va[0].id, vb[0].id);
+fn editor_yjs_updates_apply_in_the_backend() {
+    let hex = |s: &str| (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect::<Vec<u8>>();
+    let s = store();
+    let n = s.create_note(NewNote { title: "Compat".into(), body: String::new(), ..Default::default() }).unwrap();
+    let base = hex("0101922100040104626f64790b68c3a96c6c6f20f09f9a8000");
+    let insert = hex("0101922108849221070620776f726c6400");
+    let delete = hex("00019221010001");
+    assert_eq!(s.apply_note_update(n.id, &base, true).unwrap().as_deref(), Some("héllo 🚀"));
+    assert_eq!(s.apply_note_update(n.id, &insert, true).unwrap().as_deref(), Some("héllo 🚀 world"));
+    assert_eq!(s.apply_note_update(n.id, &delete, true).unwrap().as_deref(), Some("éllo 🚀 world"));
+    assert_eq!(s.get_note(n.id).unwrap().body, "éllo 🚀 world");
+}
 
-    // One has notes: the empty one gives way.
-    let c = store();
-    let d = store();
-    let n = note(&c, "Kept", "");
-    sync_pair(&c, &d);
-    sync_pair(&c, &d);
-    let vd = d.list_vaults().unwrap();
-    assert_eq!(vd.len(), 1, "{vd:?}");
-    assert_eq!(d.get_note(n.id).unwrap().vault_id, vd[0].id);
+// ---- shared vaults ----
 
-    // Both have notes: both vaults stay.
-    let e = store();
-    let f = store();
-    note(&e, "E", "");
-    note(&f, "F", "");
-    sync_pair(&e, &f);
-    assert_eq!(e.list_vaults().unwrap().len(), 2);
+/// What the network layer does between two paired devices: each shared vault syncs both ways,
+/// each side only accepting rows of vaults it shares with the other.
+fn sync_shared(a: &Store, a_id: &str, b: &Store, b_id: &str) {
+    for _ in 0..2 {
+        for (from, from_id, to, to_id) in [(a, a_id, b, b_id), (b, b_id, a, a_id)] {
+            let scope = to.sync_scope(from_id).unwrap();
+            for s in from.shares_with(to_id).unwrap() {
+                if s.role == ShareRole::Left || !scope.vaults.contains(&s.vault_id) {
+                    continue;
+                }
+                let seen = to.vault_version_vector(s.vault_id).unwrap();
+                let cs = from.vault_changes_since(s.vault_id, &seen).unwrap();
+                to.apply_vault_changes(&cs, &scope).unwrap();
+            }
+        }
+    }
+}
+
+fn vault_names(s: &Store) -> Vec<String> {
+    let mut v: Vec<String> = s.list_vaults().unwrap().into_iter().map(|v| v.name).collect();
+    v.sort();
+    v
+}
+
+fn titles(s: &Store, vault: Uuid) -> Vec<String> {
+    let mut t: Vec<String> = s
+        .list_notes(&ListFilter { vault_id: Some(vault), ..Default::default() })
+        .unwrap()
+        .into_iter()
+        .map(|n| n.title)
+        .collect();
+    t.sort();
+    t
+}
+
+#[test]
+fn only_shared_vaults_sync_and_show_up_as_their_own_vault() {
+    let mut a = store();
+    let mut b = store();
+    let a_personal = a.default_vault().unwrap();
+    let b_personal = b.default_vault().unwrap();
+    note_in(&a, a_personal, "A private", "");
+    note_in(&b, b_personal, "B private", "");
+    let team = a.create_vault("Team", None).unwrap();
+    note_in(&a, team.id, "Plan", "ship it");
+
+    // Paired but nothing shared: nothing moves.
+    sync_shared(&a, "A", &b, "B");
+    assert_eq!(vault_names(&b), vec!["Personal"]);
+
+    // A shares Team; B accepts: it appears next to B's own vault, which is untouched.
+    a.share_vault(team.id, "B").unwrap();
+    assert!(b.accept_shared_vault(team.id, "A").unwrap());
+    sync_shared(&a, "A", &b, "B");
+    assert_eq!(vault_names(&b), vec!["Personal", "Team"]);
+    assert_eq!(titles(&b, team.id), vec!["Plan"]);
+    assert_eq!(titles(&b, b_personal), vec!["B private"]);
+    let shared = b.get_vault(team.id).unwrap();
+    assert_eq!(shared.owner.as_deref(), Some("A"));
+    assert_eq!(a.get_vault(team.id).unwrap().shared_with, vec!["B".to_string()]);
+
+    // Edits flow both ways inside the shared vault — and only there.
+    note_in(&b, team.id, "Idea from B", "");
+    note_in(&b, b_personal, "Still private", "");
+    sync_shared(&a, "A", &b, "B");
+    assert_eq!(titles(&a, team.id), vec!["Idea from B", "Plan"]);
+    assert_eq!(titles(&a, a_personal), vec!["A private"]);
+    assert_eq!(vault_names(&a), vec!["Personal", "Team"]);
+}
+
+#[test]
+fn deleting_your_own_notes_never_deletes_anyone_elses() {
+    let mut a = store();
+    let mut b = store();
+    let a_personal = a.default_vault().unwrap();
+    let b_personal = b.default_vault().unwrap();
+    for t in ["one", "two"] {
+        note_in(&a, a_personal, t, "");
+    }
+    let bn = note_in(&b, b_personal, "b note", "");
+    let team = a.create_vault("Team", None).unwrap();
+    a.share_vault(team.id, "B").unwrap();
+    b.accept_shared_vault(team.id, "A").unwrap();
+    sync_shared(&a, "A", &b, "B");
+
+    // B deletes everything of its own while apart (even its Personal vault's notes)…
+    b.delete_note(bn.id).unwrap();
+    sync_shared(&a, "A", &b, "B");
+    // …A keeps all of its notes and vaults, and can still write.
+    assert_eq!(titles(&a, a_personal), vec!["one", "two"]);
+    assert_eq!(vault_names(&a), vec!["Personal", "Team"]);
+    note_in(&a, a_personal, "three", "");
+    // B can't delete A's shared vault either; it can only leave it.
+    assert!(b.delete_vault(team.id, None).is_err());
+    let owner = b.leave_vault(team.id).unwrap();
+    assert_eq!(owner, "A");
+    a.remove_share(team.id, "B").unwrap();
+    sync_shared(&a, "A", &b, "B");
+    assert_eq!(vault_names(&a), vec!["Personal", "Team"]);
+    assert_eq!(vault_names(&b), vec!["Personal"]);
+}
+
+#[test]
+fn ending_a_share_removes_only_the_members_copy() {
+    let mut a = store();
+    let mut b = store();
+    let team = a.create_vault("Team", None).unwrap();
+    note_in(&a, team.id, "Plan", "");
+    a.share_vault(team.id, "B").unwrap();
+    b.accept_shared_vault(team.id, "A").unwrap();
+    sync_shared(&a, "A", &b, "B");
+    assert_eq!(titles(&b, team.id), vec!["Plan"]);
+
+    // Unpairing: B loses everything A shared; A keeps it.
+    assert!(b.forget_peer("A").unwrap());
+    a.forget_peer("B").unwrap();
+    assert_eq!(vault_names(&b), vec!["Personal"]);
+    assert_eq!(titles(&a, team.id), vec!["Plan"]);
+    // B's removal left no tombstones behind that could delete A's notes later.
+    let tombs: i64 = b.conn.query_row("SELECT COUNT(*) FROM tombstones", [], |r| r.get(0)).unwrap();
+    assert_eq!(tombs, 0);
+
+    // Sharing again sends everything again.
+    a.share_vault(team.id, "B").unwrap();
+    b.accept_shared_vault(team.id, "A").unwrap();
+    sync_shared(&a, "A", &b, "B");
+    assert_eq!(titles(&b, team.id), vec!["Plan"]);
+    assert_eq!(titles(&a, team.id), vec!["Plan"]);
+}
+
+#[test]
+fn a_device_cannot_write_outside_what_is_shared_with_it() {
+    let mut a = store();
+    let mut b = store();
+    let a_personal = a.default_vault().unwrap();
+    let secret = note_in(&a, a_personal, "Secret", "mine");
+    let team = a.create_vault("Team", None).unwrap();
+    a.share_vault(team.id, "B").unwrap();
+    b.accept_shared_vault(team.id, "A").unwrap();
+    sync_shared(&a, "A", &b, "B");
+
+    // B forges rows: an edit of A's private note (claiming it's in Team), a delete of it, and
+    // a delete of the whole shared vault (only the owner may do that).
+    let mut cs = a.changes_since(&Default::default()).unwrap();
+    for r in cs.rows.iter_mut().filter(|r| r.table == "notes") {
+        r.values.insert("vault_id".into(), SqlValue::Blob(team.id.as_bytes().to_vec()));
+        r.values.insert("body".into(), SqlValue::Text("hacked".into()));
+        r.values.insert("hlc".into(), SqlValue::Text("9999999999999.00000.zzz".into()));
+    }
+    cs.tombstones = vec![
+        Tombstone {
+            entity: "notes".into(),
+            id: secret.id.as_bytes().to_vec(),
+            hlc: "9999999999999.00000.zzz".into(),
+            origin: "zzz".into(),
+            vault_id: Some(team.id.as_bytes().to_vec()),
+        },
+        Tombstone {
+            entity: "vaults".into(),
+            id: team.id.as_bytes().to_vec(),
+            hlc: "9999999999999.00000.zzz".into(),
+            origin: "zzz".into(),
+            vault_id: Some(team.id.as_bytes().to_vec()),
+        },
+    ];
+    a.apply_vault_changes(&cs, &a.sync_scope("B").unwrap()).unwrap();
+    let n = a.get_note(secret.id).unwrap();
+    assert_eq!((n.body.as_str(), n.vault_id), ("mine", a_personal));
+    assert!(a.get_vault(team.id).is_ok());
+}
+
+#[test]
+fn moving_a_note_out_of_a_shared_vault_removes_it_for_members() {
+    let mut a = store();
+    let mut b = store();
+    let a_personal = a.default_vault().unwrap();
+    let team = a.create_vault("Team", None).unwrap();
+    let n = note_in(&a, team.id, "Draft", "");
+    a.share_vault(team.id, "B").unwrap();
+    b.accept_shared_vault(team.id, "A").unwrap();
+    sync_shared(&a, "A", &b, "B");
+    assert_eq!(titles(&b, team.id), vec!["Draft"]);
+
+    a.move_note_to_vault(n.id, a_personal).unwrap();
+    sync_shared(&a, "A", &b, "B");
+    assert!(titles(&b, team.id).is_empty(), "gone for B");
+    assert!(b.get_note(n.id).is_err(), "B never sees A's private vault");
+    assert_eq!(titles(&a, a_personal), vec!["Draft"]);
+}
+
+#[test]
+fn leftover_copies_from_the_old_sync_stay_yours_next_to_the_shared_vault() {
+    let mut a = store();
+    let mut b = store();
+    let shared = a.default_vault().unwrap();
+    note_in(&a, shared, "From A", "");
+    // Before per-vault sync, pairing copied everything: B has A's "Personal" (same id).
+    b.apply_changes(&a.changes_since(&Default::default()).unwrap()).unwrap();
+    b.conn.execute_batch(crate::sync::LEGACY_VAULTS_MIGRATION.replace("CREATE TABLE legacy_vaults (id BLOB PRIMARY KEY) WITHOUT ROWID;", "DELETE FROM legacy_vaults;").as_str()).unwrap();
+    // Both share "their" Personal with each other — the stuck state.
+    a.share_vault(shared, "B").unwrap();
+    b.share_vault(shared, "A").unwrap();
+
+    // B's copy also has B's own additions, in a folder, pinned, with a tag.
+    let folder = b.create_folder(Some(shared), None, "Mine").unwrap();
+    let own = b
+        .create_note(NewNote { title: "B only".into(), tags: vec!["b".into()], pinned: true, vault_id: Some(shared), folder_id: Some(folder.id), ..Default::default() })
+        .unwrap();
+    let b_vaults_before = b.list_vaults().unwrap().len();
+
+    // Only the device that didn't create it gives way: its copy becomes its own vault.
+    assert!(!a.accept_shared_vault(shared, "B").unwrap());
+    assert!(b.accept_shared_vault(shared, "A").unwrap());
+    sync_shared(&a, "A", &b, "B");
+    assert_eq!(b.list_vaults().unwrap().len(), b_vaults_before + 1, "both listed");
+    assert_eq!(b.get_vault(shared).unwrap().owner.as_deref(), Some("A"));
+    assert_eq!(titles(&b, shared), vec!["From A"], "A's vault as A has it");
+    let mine = b.list_vaults().unwrap().into_iter().find(|v| v.owner.is_none() && titles(&b, v.id).contains(&"B only".to_string())).unwrap();
+    assert_eq!(mine.name, "Personal");
+    assert_eq!(titles(&b, mine.id), vec!["B only", "From A"], "B's copy kept, with its own notes");
+    let copied = b.list_notes(&ListFilter { vault_id: Some(mine.id), ..Default::default() }).unwrap().into_iter().find(|n| n.title == "B only").unwrap();
+    assert!(copied.pinned && copied.tags == vec!["b".to_string()] && copied.folder_id.is_some());
+    assert!(b.get_note(own.id).is_err() || b.get_note(own.id).unwrap().vault_id != shared);
+
+    // A stops sharing: only the shared vault goes; B's own copy stays.
+    a.unshare_vault(shared, "B").unwrap();
+    b.drop_shared_vault(shared).unwrap();
+    assert!(b.get_vault(shared).is_err());
+    assert_eq!(titles(&b, mine.id), vec!["B only", "From A"]);
+    assert_eq!(titles(&a, shared), vec!["From A"], "A's untouched");
+
+    // Vaults made since can never be taken over that way.
+    let mine = b.create_vault("Mine", None).unwrap();
+    assert!(!b.accept_shared_vault(mine.id, "A").unwrap());
+    assert!(b.get_vault(mine.id).unwrap().owner.is_none());
 }

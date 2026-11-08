@@ -22,8 +22,8 @@ import { api, p2p, type Folder, type Id, type Note, type TidyResult } from '../a
 import { MarkdownBar } from '../components/MarkdownBar'
 import { AiMenu } from '../components/AiMenu'
 import { setImageWidth } from '../lib/attachments'
-import { REMOTE_TEXT, SYNCED, connectedCount, throttle, useCollab } from '../lib/collab'
-import { applyRemoteText, type RemoteCaret } from '../lib/remoteCarets'
+import { SYNCED, connectedCount, throttle, useCollab } from '../lib/collab'
+import { openNoteSession, type NoteSession } from '../lib/noteSession'
 import { useApp } from '../context'
 import { Editor } from '../components/Editor'
 import { Markdown } from '../components/Markdown'
@@ -102,15 +102,22 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [noteId, locked])
 
-  const save = useDebounced(async (id: Id, title: string, body: string) => {
+  // Body changes made outside the editor (e.g. resizing an image in preview). Editor typing is
+  // stored by the note session as CRDT updates instead — never as whole text, which would
+  // overwrite what collaborators typed in the meantime.
+  const save = useDebounced(async (id: Id, body: string) => {
     try {
-      const n = await api.updateNote(id, { title, body })
+      const n = await api.updateNote(id, { body })
       publishNote(n)
       setCurrent((c) => (c && c.id === n.id ? { ...n, title: c.title, body: c.body } : c))
     } catch (e) {
       fail(e)
     }
   }, 500)
+  // Let the note list etc. know about stored edits now and then.
+  const announce = useDebounced((id: Id) => {
+    api.getNote(id).then(publishNote).catch(() => {})
+  }, 800)
 
   const saveTitle = useDebounced(async (id: Id, title: string) => {
     try {
@@ -129,25 +136,18 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
     [noteId], // eslint-disable-line react-hooks/exhaustive-deps
   )
 
-  const edit = (patch: { title?: string; body?: string }, remote = false) => {
+  /** `fromEditor`: the body change was typed in (or merged into) the editor, which stores it itself. */
+  const edit = (patch: { title?: string; body?: string }, fromEditor = false) => {
     if (!current || !draft.current) return
     draft.current = { ...draft.current, ...patch }
-    setCurrent({ ...current, ...patch })
-    if (current.kind === 'whiteboard') {
-      // The canvas saves its own scene; only the title goes through here (never the body).
-      if (patch.title !== undefined) saveTitle.call(current.id, draft.current.title)
-      return
-    }
-    save.call(current.id, draft.current.title, draft.current.body)
-    // Stream text to collaborators as you type (not edits that came from them).
-    if (!remote && patch.body !== undefined && !current.encrypted && connectedCount() > 0) {
-      sendText(current.id, draft.current.body)
-    }
+    setCurrent((c) => (c && c.id === current.id ? { ...c, ...patch } : c))
+    if (patch.title !== undefined) saveTitle.call(current.id, draft.current.title)
+    // Whiteboards save their own scene; editor text is saved by the note session.
+    if (patch.body !== undefined && current.kind === 'note' && !fromEditor) save.call(current.id, draft.current.body)
   }
 
   // ---- live collaboration ----
   const collab = useCollab()
-  const sendText = useMemo(() => throttle((id: Id, body: string) => p2p.liveText(id, body).catch(() => {}), 120), [])
   const sendCaret = useMemo(
     () => throttle((id: Id | null, anchor: number | null, head: number | null) => p2p.livePresence(id, anchor, head, null).catch(() => {}), 80),
     [],
@@ -159,47 +159,52 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
     return () => sendCaret(null, null, null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current?.id])
-  // Text merged from a collaborator: splice it into the editor without moving our caret.
+  const here = current ? collab.presence.filter((p) => p.noteId === current.id) : []
+
+  // The shared text document behind the editor (loaded per note / editor remount).
+  const editing = !!current && current.kind === 'note' && !preview && !current.archivedAt
+  const [session, setSession] = useState<NoteSession | null>(null)
   useEffect(() => {
-    const onRemote = (e: Event) => {
-      const { noteId: id, body } = (e as CustomEvent<{ noteId: string; body: string }>).detail
-      if (!current || id !== current.id || !draft.current) return
-      draft.current = { ...draft.current, body }
-      if (viewRef.current) applyRemoteText(viewRef.current, body)
-      else setCurrent((c) => (c ? { ...c, body } : c))
+    if (!editing || !current) return
+    const id = current.id
+    let open: NoteSession | null = null
+    let cancelled = false
+    openNoteSession(id, () => announce.call(id))
+      .then((s) => {
+        if (cancelled) return s.close()
+        open = s
+        setSession(s)
+      })
+      .catch(fail)
+    return () => {
+      cancelled = true
+      open?.close()
+      setSession(null)
     }
-    // Background sync touched this note (e.g. title, or edits made while apart): reload it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current?.id, editorKey, editing])
+
+  // Background sync touched this note's title or details: reload them. (Its text is merged
+  // by the note session; in preview, take the stored text.)
+  useEffect(() => {
     const onSynced = (e: Event) => {
       const ids = (e as CustomEvent<string[]>).detail
       if (!current || !ids.includes(current.id)) return
       api
         .getNote(current.id)
         .then((n) => {
-          if (n.kind === 'note' && viewRef.current && n.body !== draft.current?.body) applyRemoteText(viewRef.current, n.body)
           if (document.activeElement !== titleRef.current && n.title !== draft.current?.title) {
             draft.current = { ...(draft.current ?? { id: n.id, title: n.title, body: n.body }), title: n.title }
           }
+          if (!editing && n.kind === 'note' && draft.current) draft.current = { ...draft.current, body: n.body }
           setCurrent((c) => (c && c.id === n.id ? { ...n, body: draft.current?.body ?? n.body, title: draft.current?.title ?? n.title } : c))
           publishNote(n)
         })
         .catch(() => {})
     }
-    window.addEventListener(REMOTE_TEXT, onRemote)
     window.addEventListener(SYNCED, onSynced)
-    return () => {
-      window.removeEventListener(REMOTE_TEXT, onRemote)
-      window.removeEventListener(SYNCED, onSynced)
-    }
-  }, [current, publishNote])
-  const here = current ? collab.presence.filter((p) => p.noteId === current.id) : []
-  const remoteCarets: RemoteCaret[] = useMemo(
-    () =>
-      here
-        .filter((p) => p.head != null)
-        .map((p) => ({ id: p.peer, name: p.name, color: p.color, anchor: p.anchor ?? p.head!, head: p.head! })),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [JSON.stringify(here)],
-  )
+    return () => window.removeEventListener(SYNCED, onSynced)
+  }, [current, editing, publishNote])
 
   const replaceCurrent = (n: Note, remountEditor = false) => {
     setCurrent(n)
@@ -402,14 +407,15 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
                 onResizeImage={readOnly ? undefined : (src, occ, width) => edit({ body: setImageWidth(draft.current?.body ?? current.body, src, occ, width) })}
               />
             </div>
+          ) : !session || session.noteId !== current.id ? (
+            <div className="editor-host" />
           ) : (
             <Editor
               key={`${current.id}:${editorKey}`}
               value={current.body}
+              session={session}
               vaultId={current.vaultId}
-              onChange={(body, remote) => edit({ body }, remote)}
-              onSelection={(anchor, head) => connectedCount() > 0 && sendCaret(current.id, anchor, head)}
-              remoteCarets={remoteCarets}
+              onChange={(body) => edit({ body }, true)}
               onOpenLink={openLink}
               grammar={grammar}
               autoFocus={!current.body && !!current.title}

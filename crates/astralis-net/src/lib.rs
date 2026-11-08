@@ -22,11 +22,16 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use uuid_like::short_id;
 pub use wire::Live;
-use wire::{Wire, read_frame, write_frame};
+use wire::{OfferRole, VaultOffer, Wire, read_frame, write_frame};
+pub use wire::JoinRequest;
+use astralis_core::sync::ShareRole;
 
 pub const ALPN: &[u8] = b"astralis/sync/1";
 const TRUSTED_KEY: &str = "p2p.trusted";
 const NAME_KEY: &str = "p2p.name";
+const COLOR_KEY: &str = "p2p.color";
+/// Why a connection was refused when the devices aren't (or are no longer) paired.
+const NOT_PAIRED: &str = "not paired";
 const PAIRING_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_PAIR_ATTEMPTS: u32 = 5;
 const SYNC_TICK: Duration = Duration::from_millis(700);
@@ -47,6 +52,9 @@ pub struct TrustedPeer {
     pub id: String,
     pub name: String,
     pub paired_at: i64,
+    /// The color they chose (last seen), shown while they're offline too.
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 /// A device as the UI sees it.
@@ -72,10 +80,10 @@ pub enum NetEvent {
     Synced { peer: String, stats: ApplyStats, notes: Vec<String> },
     /// A live collaboration message from a connected peer.
     Live { peer: String, name: String, color: String, live: Live },
-    /// A live text update was merged into a note; `body` is the new text.
-    RemoteText { peer: String, note_id: String, body: String },
     /// Pairing finished.
     Paired { peer: String, name: String },
+    /// A shared vault appeared or was removed on this device.
+    VaultsChanged,
 }
 
 pub type EventSink = Arc<dyn Fn(NetEvent) + Send + Sync>;
@@ -97,6 +105,8 @@ impl Default for NetOptions {
 
 struct Session {
     name: String,
+    color: String,
+    conn: Connection,
     tx: mpsc::UnboundedSender<Wire>,
 }
 
@@ -110,6 +120,7 @@ struct Inner {
     endpoint: Endpoint,
     store: StoreHandle,
     name: RwLock<String>,
+    color: RwLock<String>,
     trusted: Mutex<HashMap<EndpointId, TrustedPeer>>,
     pairing: Mutex<Option<Pairing>>,
     sessions: Mutex<HashMap<EndpointId, Session>>,
@@ -123,9 +134,29 @@ pub struct Net {
     router: Router,
 }
 
-/// A stable color per device (for carets and cursors).
+/// The note a live message is about, if any.
+fn live_note(live: &Live) -> Option<&str> {
+    match live {
+        Live::Presence { note_id, .. } => note_id.as_deref(),
+        Live::Update { note_id, .. } | Live::Awareness { note_id, .. } | Live::Scene { note_id, .. } => Some(note_id),
+        Live::Profile { .. } => None,
+    }
+}
+
+#[derive(Default)]
+struct Reconciled {
+    /// Vaults to sync now, with what the peer has seen of each.
+    sync: Vec<(uuid::Uuid, VersionVector)>,
+    /// Our offer changed (we accepted something): send it again.
+    resend: bool,
+    vaults_changed: bool,
+}
+
+/// Colors offered in Settings (and the default pick per device).
+pub const COLORS: [&str; 8] = ["#8b7bff", "#4fd1a5", "#ff9f5a", "#ff6b81", "#6bb4ff", "#ffd166", "#c792ea", "#5ee7df"];
+
+/// A stable default color per device (for carets and cursors) until the user picks one.
 pub fn color_for(id: &str) -> String {
-    const COLORS: [&str; 8] = ["#8b7bff", "#4fd1a5", "#ff9f5a", "#ff6b81", "#6bb4ff", "#ffd166", "#c792ea", "#5ee7df"];
     let h = id.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
     COLORS[h as usize % COLORS.len()].to_owned()
 }
@@ -149,22 +180,29 @@ pub fn load_or_create_key(path: &Path) -> Result<SecretKey> {
     Ok(key)
 }
 
+/// The person's username on this computer (what collaborators see until they change it).
 fn default_name() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .or_else(|| std::fs::read_to_string("/etc/hostname").ok().map(|s| s.trim().to_owned()))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "My device".into())
+    ["USER", "USERNAME", "LOGNAME"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "Me".into())
+}
+
+/// Accepts `#rgb` / `#rrggbb` colors only (they end up in CSS).
+fn valid_color(c: &str) -> bool {
+    let hex = c.strip_prefix('#').unwrap_or("");
+    matches!(hex.len(), 3 | 6) && hex.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 impl Net {
     pub async fn start(store: StoreHandle, key: SecretKey, options: NetOptions, events: EventSink) -> Result<Self> {
-        let (name, trusted) = {
+        let (name, color, trusted) = {
             let s = store.lock().unwrap();
             let name = s.get_setting(NAME_KEY)?.unwrap_or_else(default_name);
+            let color = s.get_setting(COLOR_KEY)?.filter(|c| valid_color(c));
             let trusted: Vec<TrustedPeer> =
                 s.get_setting(TRUSTED_KEY)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
-            (name, trusted)
+            (name, color, trusted)
         };
         let user_data = iroh::endpoint_info::UserData::try_from(format!("astralis:{}", truncate(&name, 200)))
             .map_err(|e| anyhow!("{e}"))?;
@@ -184,6 +222,7 @@ impl Net {
             endpoint: endpoint.clone(),
             store,
             name: RwLock::new(name),
+            color: RwLock::new(color.unwrap_or_else(|| color_for(&endpoint.id().to_string()))),
             trusted: Mutex::new(trusted),
             pairing: Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
@@ -227,7 +266,8 @@ impl Net {
         let inner2 = inner.clone();
         tokio::spawn(async move {
             loop {
-                let ids: Vec<EndpointId> = inner2.trusted.lock().unwrap().keys().copied().collect();
+                let mut ids: Vec<EndpointId> = inner2.trusted.lock().unwrap().keys().copied().collect();
+                ids.extend(inner2.vault_peers());
                 for id in ids {
                     inner2.clone().maybe_connect(id);
                 }
@@ -258,6 +298,23 @@ impl Net {
         }
         self.inner.store.lock().unwrap().set_setting(NAME_KEY, &name)?;
         *self.inner.name.write().unwrap() = name;
+        self.inner.send_profile();
+        Ok(())
+    }
+
+    /// This device's color (carets, cursors, avatars) as collaborators see it.
+    pub fn color(&self) -> String {
+        self.inner.color.read().unwrap().clone()
+    }
+
+    pub fn set_color(&self, color: &str) -> Result<()> {
+        let color = color.trim().to_ascii_lowercase();
+        if !valid_color(&color) {
+            bail!("not a color: {color}");
+        }
+        self.inner.store.lock().unwrap().set_setting(COLOR_KEY, &color)?;
+        *self.inner.color.write().unwrap() = color;
+        self.inner.send_profile();
         Ok(())
     }
 
@@ -308,7 +365,7 @@ impl Net {
             bail!("no Astralis devices found nearby — make sure both are on the same network");
         }
         for target in targets {
-            match self.inner.clone().dial(target, Some(code.clone())).await {
+            match self.inner.clone().dial(target, Some(code.clone()), None).await {
                 Ok(peer) => return Ok(peer),
                 Err(e) => tracing::debug!("pairing attempt failed: {e:#}"),
             }
@@ -321,15 +378,67 @@ impl Net {
         let id: EndpointId = id.parse().map_err(|e| anyhow!("{e}"))?;
         self.inner.trusted.lock().unwrap().remove(&id);
         self.inner.save_trusted()?;
-        self.inner.sessions.lock().unwrap().remove(&id);
+        self.inner.drop_shares(id);
+        // Hang up: tell the other device (so it forgets us too), then close the connection.
+        let session = self.inner.sessions.lock().unwrap().remove(&id);
+        if let Some(s) = session {
+            let _ = s.tx.send(Wire::Unpair);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                s.conn.close(1u32.into(), b"unpaired");
+            });
+        }
         self.inner.emit_peers();
         Ok(())
     }
 
     /// Sends a live message (text, caret, pointer) to every connected device.
     pub fn broadcast(&self, live: Live) {
-        for s in self.inner.sessions.lock().unwrap().values() {
-            let _ = s.tx.send(Wire::Live(live.clone()));
+        let peers: Vec<EndpointId> = self.inner.sessions.lock().unwrap().keys().copied().collect();
+        // Live updates about a note only go to devices it's shared with.
+        let allowed: Vec<EndpointId> = match live_note(&live) {
+            Some(note) => peers.into_iter().filter(|p| self.inner.peer_may_see(p, note)).collect(),
+            None => peers,
+        };
+        let sessions = self.inner.sessions.lock().unwrap();
+        for p in allowed {
+            if let Some(s) = sessions.get(&p) {
+                let _ = s.tx.send(Wire::Live(live.clone()));
+            }
+        }
+    }
+
+    /// Joins a cloud vault someone invited us to: connects to the owner's device (by identity,
+    /// anywhere) and presents the invite. The vault then syncs like any shared vault.
+    pub async fn join_vault(&self, owner: &str, request: JoinRequest) -> Result<PeerStatus> {
+        self.join_vault_at(owner, request, None).await
+    }
+
+    /// [`Net::join_vault`] with a known address (tests, where there's no address lookup).
+    pub async fn join_vault_at(&self, owner: &str, request: JoinRequest, addr: Option<EndpointAddr>) -> Result<PeerStatus> {
+        let id: EndpointId = owner.parse().map_err(|_| anyhow!("the invite has a bad owner id"))?;
+        let vault = request.vault;
+        if !self.inner.store.lock().unwrap().accept_shared_vault(vault, owner).map_err(|e| anyhow!("{e}"))? {
+            bail!("you already have this vault");
+        }
+        let result = self.inner.clone().dial(addr.unwrap_or_else(|| id.into()), None, Some(request)).await;
+        if let Err(e) = &result {
+            // Undo the pending membership; nothing of theirs arrived.
+            let _ = self.inner.store.lock().unwrap().remove_share(vault, owner);
+            if e.to_string().contains("timed out") || e.to_string().contains("connect") {
+                bail!("couldn't reach the owner's device — it needs to be online (Astralis open) to let you in the first time");
+            }
+            bail!("the owner's device didn't accept the invite ({e})");
+        }
+        result
+    }
+
+    /// Shares changed for a device (shared, unshared, left, deleted): tell it now if connected.
+    pub fn shares_changed(&self, peer: &str) {
+        let Ok(id) = peer.parse::<EndpointId>() else { return };
+        let msg = self.inner.offers(&id);
+        if let Some(s) = self.inner.sessions.lock().unwrap().get(&id) {
+            let _ = s.tx.send(msg);
         }
     }
 
@@ -376,13 +485,19 @@ impl ProtocolHandler for Handler {
         let peer = conn.remote_id();
         let (mut send, mut recv) = conn.accept_bi().await?;
         let hello = read_frame(&mut recv).await.map_err(|e| AcceptError::from_err(std::io::Error::other(e.to_string())))?;
-        let Wire::Hello { name, pair_code } = hello else {
+        let Wire::Hello { name, pair_code, join } = hello else {
             return Ok(());
         };
         let trusted = inner.trusted.lock().unwrap().contains_key(&peer);
-        let accepted = trusted || pair_code.as_deref().is_some_and(|c| inner.check_code(c));
+        let paired_now = !trusted && pair_code.as_deref().is_some_and(|c| inner.check_code(c));
+        // Someone invited to a cloud vault by email: their invite secret lets them in (to that
+        // vault only — they aren't paired).
+        let joined = join.as_ref().is_some_and(|j| {
+            inner.store.lock().unwrap().redeem_cloud_invite(j.vault, &j.email, &j.secret, &peer.to_string()).unwrap_or(false)
+        });
+        let accepted = trusted || paired_now || joined || inner.is_vault_peer(&peer);
         if !accepted {
-            let _ = write_frame(&mut send, &Wire::Reject { reason: "not paired".into() }).await;
+            let _ = write_frame(&mut send, &Wire::Reject { reason: NOT_PAIRED.into() }).await;
             let _ = send.finish();
             conn.closed().await;
             return Ok(());
@@ -391,8 +506,11 @@ impl ProtocolHandler for Handler {
         write_frame(&mut send, &Wire::Welcome { name: my_name })
             .await
             .map_err(|e| AcceptError::from_err(std::io::Error::other(e.to_string())))?;
-        if !trusted {
+        if paired_now {
             inner.trust(peer, &name);
+        }
+        if joined {
+            inner.emit(NetEvent::VaultsChanged);
         }
         inner.run_session(conn, send, recv, peer, name).await;
         Ok(())
@@ -404,11 +522,190 @@ impl Inner {
         (self.events)(e)
     }
 
+    /// Paired, or in a vault shared with us either way (e.g. joined a cloud vault by invite).
+    fn allowed(&self, peer: &EndpointId) -> bool {
+        self.trusted.lock().unwrap().contains_key(peer) || self.is_vault_peer(peer)
+    }
+
+    fn is_vault_peer(&self, peer: &EndpointId) -> bool {
+        self.store
+            .lock()
+            .unwrap()
+            .shares_with(&peer.to_string())
+            .is_ok_and(|s| s.iter().any(|x| x.role != ShareRole::Left))
+    }
+
+    /// Devices we share vaults with (to keep connecting to them, paired or not).
+    fn vault_peers(&self) -> Vec<EndpointId> {
+        let s = self.store.lock().unwrap();
+        let vaults = s.list_vaults().unwrap_or_default();
+        let mut out: Vec<EndpointId> = Vec::new();
+        for v in vaults {
+            for sh in s.vault_shares(v.id).unwrap_or_default() {
+                if sh.role != ShareRole::Left
+                    && let Ok(id) = sh.peer.parse::<EndpointId>()
+                    && !out.contains(&id)
+                {
+                    out.push(id);
+                }
+            }
+        }
+        out
+    }
+
+    /// Where one of our cloud vaults lives, for a device we share it with.
+    fn cloud_info_for(&self, peer: &EndpointId, vault: uuid::Uuid) -> Option<Wire> {
+        let s = self.store.lock().unwrap();
+        let cv = s.cloud_vault(vault).ok().flatten().filter(|c| c.owned)?;
+        let shared = s.vault_shares(vault).ok()?.iter().any(|x| x.peer == peer.to_string() && x.role == ShareRole::Member);
+        shared.then(|| Wire::CloudInfo { vault, provider: cv.provider, folder: cv.folder_id, key: cv.sync_key })
+    }
+
+    /// Drops a device from the paired list (it unpaired us).
+    fn forget(&self, id: EndpointId) {
+        if self.trusted.lock().unwrap().remove(&id).is_some() {
+            if let Err(e) = self.save_trusted() {
+                tracing::warn!("couldn't save paired devices: {e:#}");
+            }
+            tracing::info!("{} unpaired this device", short_id(&id));
+        }
+        self.drop_shares(id);
+        self.emit_peers();
+    }
+
+    /// Unpaired: the vaults that device shared with us go away; ours stop syncing with it.
+    fn drop_shares(&self, id: EndpointId) {
+        match self.store.lock().unwrap().forget_peer(&id.to_string()) {
+            Ok(true) => self.emit(NetEvent::VaultsChanged),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("couldn't drop vaults shared with {}: {e:#}", short_id(&id)),
+        }
+    }
+
+    /// The vaults we share with a device, and what we've seen of each.
+    fn offers(&self, peer: &EndpointId) -> Wire {
+        let s = self.store.lock().unwrap();
+        let shares = s.shares_with(&peer.to_string()).unwrap_or_default();
+        let offers = shares
+            .into_iter()
+            .map(|sh| VaultOffer {
+                vault: sh.vault_id,
+                role: match sh.role {
+                    ShareRole::Member => OfferRole::Mine,
+                    ShareRole::Owner => OfferRole::Yours,
+                    ShareRole::Left => OfferRole::Left,
+                },
+                seen: if sh.role == ShareRole::Left { VersionVector::new() } else { s.vault_version_vector(sh.vault_id).unwrap_or_default() },
+            })
+            .collect();
+        Wire::Vaults { offers }
+    }
+
+    /// Lines our shares up with a device's offer: accepts vaults it shares with us, drops ones
+    /// it stopped sharing (or we left), and says which vaults to sync.
+    fn reconcile(&self, peer: &EndpointId, theirs: &[VaultOffer]) -> Reconciled {
+        let p = peer.to_string();
+        let mut out = Reconciled::default();
+        let mut s = self.store.lock().unwrap();
+        let mine = s.shares_with(&p).unwrap_or_default();
+        let offered: HashMap<uuid::Uuid, &VaultOffer> = theirs.iter().map(|o| (o.vault, o)).collect();
+        let mut result = || -> astralis_core::Result<()> {
+            for sh in &mine {
+                let theirs = offered.get(&sh.vault_id);
+                match (sh.role, theirs.map(|o| o.role)) {
+                    (ShareRole::Member, Some(OfferRole::Yours)) | (ShareRole::Owner, Some(OfferRole::Mine)) => {
+                        out.sync.push((sh.vault_id, theirs.unwrap().seen.clone()));
+                    }
+                    // They left our vault.
+                    // (Our updated offer tells them we heard, so a later re-share isn't ignored.)
+                    (ShareRole::Member, Some(OfferRole::Left)) => {
+                        s.remove_share(sh.vault_id, &p)?;
+                        out.resend = true;
+                    }
+                    // Both of us claim it: a leftover from the old merge-everything sync. The device
+                    // that didn't create it joins the other's (it can't happen for newer vaults).
+                    (ShareRole::Member, Some(OfferRole::Mine)) => {
+                        if s.accept_shared_vault(sh.vault_id, &p)? {
+                            out.sync.push((sh.vault_id, theirs.unwrap().seen.clone()));
+                            out.resend = true;
+                            out.vaults_changed = true;
+                        }
+                    }
+                    // Shared while they were away: they'll accept when they see our offer.
+                    (ShareRole::Member, _) => {}
+                    // The owner no longer shares it with us (or deleted it): drop our copy.
+                    (ShareRole::Owner, _) => {
+                        s.drop_shared_vault(sh.vault_id)?;
+                        out.vaults_changed = true;
+                    }
+                    // We left; once the owner stops offering it, forget we did.
+                    (ShareRole::Left, Some(OfferRole::Mine)) => {}
+                    (ShareRole::Left, _) => s.remove_share(sh.vault_id, &p)?,
+                }
+            }
+            for o in theirs.iter().filter(|o| !mine.iter().any(|m| m.vault_id == o.vault)) {
+                match o.role {
+                    // A vault shared with us: accept it and ask for its contents.
+                    OfferRole::Mine => {
+                        if s.accept_shared_vault(o.vault, &p)? {
+                            out.sync.push((o.vault, o.seen.clone()));
+                            out.resend = true;
+                            out.vaults_changed = true;
+                        }
+                    }
+                    // They think they're in a vault of ours we stopped sharing: our offer says so.
+                    OfferRole::Yours => out.resend = true,
+                    OfferRole::Left => {}
+                }
+            }
+            Ok(())
+        };
+        if let Err(e) = result() {
+            tracing::warn!("couldn't line up shared vaults with {}: {e:#}", short_id(peer));
+        }
+        out
+    }
+
+    /// Whether a device may see (or send live updates for) a note: it's in a vault shared with it.
+    fn peer_may_see(&self, peer: &EndpointId, note_id: &str) -> bool {
+        let Ok(id) = note_id.parse::<uuid::Uuid>() else { return false };
+        let s = self.store.lock().unwrap();
+        let Ok(Some(vault)) = s.note_vault(id) else { return false };
+        s.sync_scope(&peer.to_string()).is_ok_and(|scope| scope.vaults.contains(&vault))
+    }
+
+    fn profile(&self) -> Wire {
+        Wire::Live(Live::Profile { name: self.name.read().unwrap().clone(), color: self.color.read().unwrap().clone() })
+    }
+
+    /// Tells connected devices our new name/color.
+    fn send_profile(&self) {
+        let msg = self.profile();
+        for s in self.sessions.lock().unwrap().values() {
+            let _ = s.tx.send(msg.clone());
+        }
+    }
+
+    /// Keeps a paired device's latest name and color for when it's offline.
+    fn remember_profile(&self, id: EndpointId, name: &str, color: &str) {
+        let changed = match self.trusted.lock().unwrap().get_mut(&id) {
+            Some(t) if t.name != name || t.color.as_deref() != Some(color) => {
+                t.name = name.to_owned();
+                t.color = Some(color.to_owned());
+                true
+            }
+            _ => false,
+        };
+        if changed && let Err(e) = self.save_trusted() {
+            tracing::warn!("couldn't save paired devices: {e:#}");
+        }
+    }
+
     fn peers(&self) -> Vec<PeerStatus> {
         let trusted = self.trusted.lock().unwrap();
         let sessions = self.sessions.lock().unwrap();
         let nearby = self.nearby.lock().unwrap();
-        let mut ids: Vec<EndpointId> = trusted.keys().chain(nearby.keys()).copied().collect();
+        let mut ids: Vec<EndpointId> = trusted.keys().chain(nearby.keys()).chain(sessions.keys()).copied().collect();
         ids.sort();
         ids.dedup();
         ids.into_iter()
@@ -420,8 +717,13 @@ impl Inner {
                     .or_else(|| trusted.get(&id).map(|t| t.name.clone()))
                     .or_else(|| nearby.get(&id).cloned())
                     .unwrap_or_else(|| short_id(&id));
+                let color = sessions
+                    .get(&id)
+                    .map(|x| x.color.clone())
+                    .or_else(|| trusted.get(&id).and_then(|t| t.color.clone()))
+                    .unwrap_or_else(|| color_for(&s));
                 PeerStatus {
-                    color: color_for(&s),
+                    color,
                     id: s,
                     name,
                     trusted: trusted.contains_key(&id),
@@ -456,7 +758,7 @@ impl Inner {
     fn trust(&self, id: EndpointId, name: &str) {
         self.trusted.lock().unwrap().insert(
             id,
-            TrustedPeer { id: id.to_string(), name: name.to_owned(), paired_at: astralis_core::now_ms() },
+            TrustedPeer { id: id.to_string(), name: name.to_owned(), paired_at: astralis_core::now_ms(), color: None },
         );
         if let Err(e) = self.save_trusted() {
             tracing::warn!("couldn't save paired devices: {e:#}");
@@ -474,37 +776,39 @@ impl Inner {
     /// dials, so two devices don't open duplicate connections to each other.
     fn maybe_connect(self: Arc<Self>, id: EndpointId) {
         if id == self.endpoint.id()
-            || !self.trusted.lock().unwrap().contains_key(&id)
+            || !self.allowed(&id)
             || self.sessions.lock().unwrap().contains_key(&id)
             || self.endpoint.id() > id
         {
             return;
         }
         tokio::spawn(async move {
-            if let Err(e) = self.dial(id.into(), None).await {
+            if let Err(e) = self.dial(id.into(), None, None).await {
                 tracing::debug!("couldn't reach {}: {e:#}", short_id(&id));
             }
         });
     }
 
-    async fn dial(self: Arc<Self>, addr: EndpointAddr, pair_code: Option<String>) -> Result<PeerStatus> {
+    async fn dial(self: Arc<Self>, addr: EndpointAddr, pair_code: Option<String>, join: Option<JoinRequest>) -> Result<PeerStatus> {
         let conn = tokio::time::timeout(Duration::from_secs(8), self.endpoint.connect(addr, ALPN))
             .await
             .context("timed out connecting")??;
         let peer = conn.remote_id();
         let (mut send, mut recv) = conn.open_bi().await?;
         let my_name = self.name.read().unwrap().clone();
-        write_frame(&mut send, &Wire::Hello { name: my_name, pair_code: pair_code.clone() }).await?;
+        let joining = join.is_some();
+        write_frame(&mut send, &Wire::Hello { name: my_name, pair_code: pair_code.clone(), join }).await?;
         match read_frame(&mut recv).await? {
             Wire::Welcome { name } => {
-                if pair_code.is_some() || !self.trusted.lock().unwrap().contains_key(&peer) {
+                // Only pairing makes devices trusted; vault members stay scoped to their vaults.
+                if pair_code.is_some() {
                     self.trust(peer, &name);
                 }
                 let status = PeerStatus {
                     id: peer.to_string(),
                     color: color_for(&peer.to_string()),
                     name: name.clone(),
-                    trusted: true,
+                    trusted: pair_code.is_some() || self.trusted.lock().unwrap().contains_key(&peer),
                     connected: true,
                     nearby: true,
                 };
@@ -512,7 +816,14 @@ impl Inner {
                 tokio::spawn(async move { me.run_session(conn, send, recv, peer, name).await });
                 Ok(status)
             }
-            Wire::Reject { reason } => bail!("rejected: {reason}"),
+            Wire::Reject { reason } => {
+                // A device we trusted no longer knows us: it unpaired while we were apart.
+                // (Not when an invite was refused: that says nothing about pairing.)
+                if pair_code.is_none() && !joining && reason == NOT_PAIRED {
+                    self.forget(peer);
+                }
+                bail!("rejected: {reason}")
+            }
             _ => bail!("unexpected reply"),
         }
     }
@@ -521,8 +832,10 @@ impl Inner {
     /// messages both ways until the connection drops.
     async fn run_session(self: Arc<Self>, conn: Connection, mut send: SendStream, mut recv: RecvStream, peer: EndpointId, name: String) {
         let (tx, mut rx) = mpsc::unbounded_channel::<Wire>();
-        let color = color_for(&peer.to_string());
-        self.sessions.lock().unwrap().insert(peer, Session { name: name.clone(), tx: tx.clone() });
+        let mut name = name;
+        let mut color =
+            self.trusted.lock().unwrap().get(&peer).and_then(|t| t.color.clone()).unwrap_or_else(|| color_for(&peer.to_string()));
+        self.sessions.lock().unwrap().insert(peer, Session { name: name.clone(), color: color.clone(), conn: conn.clone(), tx: tx.clone() });
         self.emit_peers();
 
         // Writer: everything queued for this peer goes out in order.
@@ -534,37 +847,42 @@ impl Inner {
             }
         });
 
-        // Tell the peer what we've seen; it answers with what we're missing.
-        let my_vv = self.store.lock().unwrap().version_vector().unwrap_or_default();
-        let _ = tx.send(Wire::Vv(my_vv));
+        // Who we are (name and color), then the vaults we share and what we've seen of each;
+        // the peer answers with what we're missing. Nothing outside shared vaults is ever sent.
+        let _ = tx.send(self.profile());
+        let _ = tx.send(self.offers(&peer));
 
-        // What the peer is known to have (filled in once it sends its version vector).
-        let peer_vv: Arc<Mutex<Option<VersionVector>>> = Arc::new(Mutex::new(None));
+        // Per shared vault: what the peer is known to have.
+        let known: Arc<Mutex<HashMap<uuid::Uuid, VersionVector>>> = Arc::new(Mutex::new(HashMap::new()));
 
-        // Pusher: send local changes as they happen.
+        // Pusher: send local changes to shared vaults as they happen.
         let pusher = {
             let me = self.clone();
             let tx = tx.clone();
-            let peer_vv = peer_vv.clone();
+            let known = known.clone();
             tokio::spawn(async move {
-                let mut last: Option<VersionVector> = None;
+                let mut last: HashMap<uuid::Uuid, VersionVector> = HashMap::new();
                 loop {
                     tokio::time::sleep(SYNC_TICK).await;
-                    let Some(known) = peer_vv.lock().unwrap().clone() else { continue };
-                    let (vv, cs) = {
-                        let s = me.store.lock().unwrap();
-                        let vv = s.version_vector().unwrap_or_default();
-                        if last.as_ref() == Some(&vv) {
-                            continue;
+                    let vaults: Vec<(uuid::Uuid, VersionVector)> = known.lock().unwrap().iter().map(|(k, v)| (*k, v.clone())).collect();
+                    for (vault, seen) in vaults {
+                        let (vv, cs) = {
+                            let s = me.store.lock().unwrap();
+                            let Ok(vv) = s.vault_version_vector(vault) else { continue };
+                            if last.get(&vault) == Some(&vv) {
+                                continue;
+                            }
+                            (vv.clone(), s.vault_changes_since(vault, &seen))
+                        };
+                        last.insert(vault, vv.clone());
+                        if let Ok(cs) = cs {
+                            if !cs.is_empty() && tx.send(Wire::Changes(cs)).is_err() {
+                                return;
+                            }
+                            if let Some(k) = known.lock().unwrap().get_mut(&vault) {
+                                *k = merge_vv(&seen, &vv);
+                            }
                         }
-                        (vv.clone(), s.changes_since(&known))
-                    };
-                    last = Some(vv.clone());
-                    if let Ok(cs) = cs {
-                        if !cs.is_empty() && tx.send(Wire::Changes(cs)).is_err() {
-                            break;
-                        }
-                        *peer_vv.lock().unwrap() = Some(merge_vv(&known, &vv));
                     }
                 }
             })
@@ -576,16 +894,63 @@ impl Inner {
                 Ok(m) => m,
                 Err(_) => break,
             };
+            // Nothing more from a device once it's unpaired / out of every shared vault (even if
+            // the connection lingers).
+            if !self.allowed(&peer) {
+                break;
+            }
             match msg {
-                Wire::Vv(theirs) => {
-                    let cs = self.store.lock().unwrap().changes_since(&theirs);
-                    let mine = self.store.lock().unwrap().version_vector().unwrap_or_default();
-                    if let Ok(cs) = cs {
-                        if !cs.is_empty() {
+                Wire::Unpair => {
+                    self.forget(peer);
+                    break;
+                }
+                Wire::CloudInfo { vault, provider, folder, key } => {
+                    // Only from the vault's owner, about a vault they shared with us.
+                    let s = self.store.lock().unwrap();
+                    if s.vault_owner(vault).ok().flatten().as_deref() == Some(peer.to_string().as_str()) && key.len() == 32 {
+                        let uploaded_vv = s.cloud_vault(vault).ok().flatten().map(|c| c.uploaded_vv).unwrap_or_default();
+                        let _ = s.set_cloud_vault(&astralis_core::cloud::CloudVault {
+                            vault_id: vault,
+                            provider,
+                            folder_id: folder,
+                            sync_key: key,
+                            owned: false,
+                            uploaded_vv,
+                        });
+                        drop(s);
+                        self.emit(NetEvent::VaultsChanged);
+                    }
+                }
+                Wire::Vaults { offers: theirs } => {
+                    let outcome = self.reconcile(&peer, &theirs);
+                    // Send each shared vault's missing changes, and track what the peer has.
+                    let mut k = known.lock().unwrap();
+                    k.retain(|v, _| outcome.sync.iter().any(|(s, _)| s == v));
+                    for (vault, seen) in &outcome.sync {
+                        let (cs, mine) = {
+                            let s = self.store.lock().unwrap();
+                            (s.vault_changes_since(*vault, seen), s.vault_version_vector(*vault).unwrap_or_default())
+                        };
+                        if let Ok(cs) = cs
+                            && !cs.is_empty()
+                        {
                             let _ = tx.send(Wire::Changes(cs));
                         }
+                        k.insert(*vault, merge_vv(seen, &mine));
                     }
-                    *peer_vv.lock().unwrap() = Some(merge_vv(&theirs, &mine));
+                    drop(k);
+                    // Members of our cloud vaults learn where it lives on the drive (and its key).
+                    for (vault, _) in &outcome.sync {
+                        if let Some(info) = self.cloud_info_for(&peer, *vault) {
+                            let _ = tx.send(info);
+                        }
+                    }
+                    if outcome.resend {
+                        let _ = tx.send(self.offers(&peer));
+                    }
+                    if outcome.vaults_changed {
+                        self.emit(NetEvent::VaultsChanged);
+                    }
                 }
                 Wire::Changes(cs) => {
                     let notes: Vec<String> = cs
@@ -597,21 +962,40 @@ impl Inner {
                             _ => None,
                         })
                         .collect();
-                    let result = self.store.lock().unwrap().apply_changes(&cs);
+                    let result = {
+                        let s = self.store.lock().unwrap();
+                        s.sync_scope(&peer.to_string()).and_then(|scope| s.apply_vault_changes(&cs, &scope))
+                    };
                     match result {
                         Ok(stats) => self.emit(NetEvent::Synced { peer: peer.to_string(), stats, notes }),
                         Err(e) => tracing::warn!("applying changes from {} failed: {e:#}", short_id(&peer)),
                     }
                 }
+                Wire::Live(Live::Profile { name: n, color: c }) => {
+                    name = truncate(n.trim(), 60);
+                    if valid_color(&c) {
+                        color = c;
+                    }
+                    if let Some(s) = self.sessions.lock().unwrap().get_mut(&peer) {
+                        s.name = name.clone();
+                        s.color = color.clone();
+                    }
+                    self.remember_profile(peer, &name, &color);
+                    self.emit_peers();
+                }
                 Wire::Live(live) => {
-                    if let Live::Text { note_id, state } = &live {
-                        if let Ok(id) = note_id.parse::<uuid::Uuid>() {
-                            let merged = self.store.lock().unwrap().merge_note_text(id, state);
-                            if let Ok(Some(body)) = merged {
-                                self.emit(NetEvent::RemoteText { peer: peer.to_string(), note_id: note_id.clone(), body });
-                            }
-                        }
+                    // Only about notes in vaults we share with this device.
+                    if let Some(note_id) = live_note(&live)
+                        && !self.peer_may_see(&peer, note_id)
+                    {
                         continue;
+                    }
+                    // Fold text edits into the stored note right away (the editor merges them too).
+                    if let Live::Update { note_id, update } = &live
+                        && let Ok(id) = note_id.parse::<uuid::Uuid>()
+                        && let Err(e) = self.store.lock().unwrap().apply_note_update(id, update, false)
+                    {
+                        tracing::debug!("live edit for {note_id} not stored: {e:#}");
                     }
                     self.emit(NetEvent::Live { peer: peer.to_string(), name: name.clone(), color: color.clone(), live });
                 }

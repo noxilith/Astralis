@@ -16,8 +16,11 @@
 mod content;
 mod crdt;
 pub mod hlc;
+mod share;
 
 pub use content::merge_scene;
+pub use share::{ShareRole, SyncScope, VaultShare};
+pub(crate) use share::{LEGACY_VAULTS_MIGRATION, SHARE_MIGRATION};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -146,6 +149,9 @@ pub struct Tombstone {
     pub id: Vec<u8>,
     pub hlc: String,
     pub origin: String,
+    /// The vault the deleted (or moved-out) row was in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_id: Option<Vec<u8>>,
 }
 
 /// Everything one device has that another hasn't seen.
@@ -317,12 +323,24 @@ impl Store {
 
     /// Everything newer than what `seen` covers. Built-in templates are per-device, not synced.
     pub fn changes_since(&self, seen: &VersionVector) -> Result<ChangeSet> {
+        self.collect_changes(seen, None)
+    }
+
+    /// Changes newer than `seen`: everything, or only one vault's rows.
+    pub(crate) fn collect_changes(&self, seen: &VersionVector, vault: Option<Uuid>) -> Result<ChangeSet> {
         let newer = |origin: &str, hlc: &str| seen.get(origin).is_none_or(|s| hlc > s.as_str());
         let mut rows = Vec::new();
-        for &table in SYNCED_TABLES {
-            let mut stmt = self.conn.prepare(&format!("SELECT * FROM {table}"))?;
+        let tables: &[&str] = if vault.is_some() { share::VAULT_TABLES } else { SYNCED_TABLES };
+        let vault_arg: Vec<u8> = vault.map(|v| v.as_bytes().to_vec()).unwrap_or_default();
+        for &table in tables {
+            let filter = match (vault, table) {
+                (None, _) => "1 = 1 OR ?1 IS NULL",
+                (Some(_), "vaults") => "id = ?1",
+                (Some(_), _) => "vault_id = ?1",
+            };
+            let mut stmt = self.conn.prepare(&format!("SELECT * FROM {table} WHERE {filter}"))?;
             let names: Vec<String> = stmt.column_names().map(str::to_owned).collect();
-            let mut q = stmt.query([])?;
+            let mut q = stmt.query([&vault_arg])?;
             while let Some(r) = q.next()? {
                 let mut values = BTreeMap::new();
                 for (i, n) in names.iter().enumerate() {
@@ -355,16 +373,19 @@ impl Store {
             );
         }
         let tombstones = {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT entity, id, hlc, origin FROM tombstones")?;
+            let mut stmt = self.conn.prepare(if vault.is_some() {
+                "SELECT entity, id, hlc, origin, vault_id FROM tombstones WHERE vault_id = ?1"
+            } else {
+                "SELECT entity, id, hlc, origin, vault_id FROM tombstones WHERE 1 = 1 OR ?1 IS NULL"
+            })?;
             let all: Vec<Tombstone> = stmt
-                .query_map([], |r| {
+                .query_map([&vault_arg], |r| {
                     Ok(Tombstone {
                         entity: r.get(0)?,
                         id: r.get(1)?,
                         hlc: r.get(2)?,
                         origin: r.get(3)?,
+                        vault_id: r.get(4)?,
                     })
                 })?
                 .collect::<rusqlite::Result<_>>()?;
@@ -381,11 +402,21 @@ impl Store {
 
     /// Applies another device's changes. Safe to repeat and to apply in any order.
     pub fn apply_changes(&self, cs: &ChangeSet) -> Result<ApplyStats> {
+        self.apply_scoped(cs, None)
+    }
+
+    /// Applies a device's changes to the vaults shared with it — and nothing else: rows for
+    /// other vaults (or that would move something out of a private vault) are ignored.
+    pub fn apply_vault_changes(&self, cs: &ChangeSet, scope: &SyncScope) -> Result<ApplyStats> {
+        self.apply_scoped(cs, Some(scope))
+    }
+
+    fn apply_scoped(&self, cs: &ChangeSet, scope: Option<&SyncScope>) -> Result<ApplyStats> {
         self.sync.applying.store(true, Ordering::SeqCst);
         let _guard = ApplyingGuard(&self.sync.applying);
         self.conn
             .execute_batch("BEGIN IMMEDIATE; PRAGMA defer_foreign_keys = ON;")?;
-        let result = self.apply_inner(cs);
+        let result = self.apply_inner(cs, scope);
         match result {
             Ok(stats) => {
                 self.conn.execute_batch("COMMIT")?;
@@ -400,7 +431,32 @@ impl Store {
         }
     }
 
-    fn apply_inner(&self, cs: &ChangeSet) -> Result<ApplyStats> {
+    /// The vault a row belongs to (for scope checks): from its values, or as stored locally.
+    fn row_vault(table: &str, id: &[u8], values: Option<&BTreeMap<String, SqlValue>>) -> Option<Uuid> {
+        match (table, values) {
+            ("vaults", _) => Uuid::from_slice(id).ok(),
+            (_, Some(v)) => v.get("vault_id").and_then(SqlValue::as_blob).and_then(|b| Uuid::from_slice(b).ok()),
+            _ => None,
+        }
+    }
+
+    fn local_row_vault(&self, table: &str, id: &[u8]) -> Result<Option<Option<Uuid>>> {
+        let sql = if table == "vaults" {
+            "SELECT id FROM vaults WHERE id = ?1".to_string()
+        } else {
+            format!("SELECT vault_id FROM {table} WHERE id = ?1")
+        };
+        Ok(self.conn.query_row(&sql, [id], |r| crate::util::opt_uuid_col(r, 0)).optional()?)
+    }
+
+    fn apply_inner(&self, cs: &ChangeSet, scope: Option<&SyncScope>) -> Result<ApplyStats> {
+        let mut vault_seen: HashMap<(Uuid, String), String> = HashMap::new();
+        let mut note_vault_seen = |v: Uuid, o: &str, h: &str| {
+            let e = vault_seen.entry((v, o.to_owned())).or_default();
+            if h > e.as_str() {
+                *e = h.to_owned();
+            }
+        };
         let mut stats = ApplyStats::default();
         let mut columns: HashMap<&str, HashSet<String>> = HashMap::new();
         for t in SYNCED_TABLES {
@@ -430,6 +486,21 @@ impl Store {
                 stats.skipped += 1;
                 continue;
             };
+            if let Some(scope) = scope {
+                let allowed = |v: &Option<Uuid>| v.is_some_and(|v| scope.vaults.contains(&v));
+                let remote_vault = Self::row_vault(table, id, Some(&row.values));
+                if !allowed(&remote_vault) {
+                    stats.skipped += 1;
+                    continue;
+                }
+                if let Some(local_vault) = self.local_row_vault(table, id)?
+                    && !allowed(&local_vault)
+                {
+                    stats.skipped += 1; // never pull a private row into a shared vault
+                    continue;
+                }
+                note_vault_seen(remote_vault.unwrap(), row.origin(), row.hlc());
+            }
             self.sync.clock.lock().unwrap().observe(row.hlc());
             note_seen(row.origin(), row.hlc());
             let cols = &columns[table];
@@ -543,6 +614,19 @@ impl Store {
             let Some(&table) = SYNCED_TABLES.iter().find(|x| **x == t.entity) else {
                 continue;
             };
+            let tomb_vault = t.vault_id.as_deref().and_then(|b| Uuid::from_slice(b).ok());
+            if let Some(scope) = scope {
+                let Some(v) = tomb_vault.filter(|v| scope.vaults.contains(v)) else { continue };
+                if table == "vaults" && !scope.owned_by_sender.contains(&v) {
+                    continue; // only the owner can delete a shared vault
+                }
+                if let Some(local_vault) = self.local_row_vault(table, &t.id)?
+                    && local_vault != Some(v)
+                {
+                    continue; // it's elsewhere now (e.g. moved into a private vault)
+                }
+                note_vault_seen(v, &t.origin, &t.hlc);
+            }
             self.sync.clock.lock().unwrap().observe(&t.hlc);
             note_seen(&t.origin, &t.hlc);
             let local: Option<String> = self
@@ -561,15 +645,18 @@ impl Store {
                 Some(_) => {
                     self.conn
                         .execute(&format!("DELETE FROM {table} WHERE id = ?1"), [&t.id])?;
+                    if table == "vaults" {
+                        self.conn.execute("DELETE FROM vault_shares WHERE vault_id = ?1", [&t.id])?;
+                    }
                     stats.deleted += 1;
                 }
                 None => {}
             }
             self.conn.execute(
-                "INSERT INTO tombstones(entity, id, hlc, origin) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(entity, id) DO UPDATE SET hlc = excluded.hlc, origin = excluded.origin
+                "INSERT INTO tombstones(entity, id, hlc, origin, vault_id) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(entity, id) DO UPDATE SET hlc = excluded.hlc, origin = excluded.origin, vault_id = excluded.vault_id
                  WHERE excluded.hlc > tombstones.hlc",
-                params![table, t.id, t.hlc, t.origin],
+                params![table, t.id, t.hlc, t.origin, t.vault_id],
             )?;
         }
 
@@ -578,6 +665,13 @@ impl Store {
                 "INSERT INTO sync_seen(origin, hlc) VALUES (?1, ?2)
                  ON CONFLICT(origin) DO UPDATE SET hlc = excluded.hlc WHERE excluded.hlc > sync_seen.hlc",
                 params![origin, hlc],
+            )?;
+        }
+        for ((vault, origin), hlc) in vault_seen {
+            self.conn.execute(
+                "INSERT INTO sync_seen_vault(vault_id, origin, hlc) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(vault_id, origin) DO UPDATE SET hlc = excluded.hlc WHERE excluded.hlc > sync_seen_vault.hlc",
+                params![vault.as_bytes(), origin, hlc],
             )?;
         }
         Ok(stats)
@@ -623,7 +717,6 @@ impl Store {
             }
         }
         self.prune_tags()?;
-        self.collapse_empty_default_vault()?;
         Ok(())
     }
 }
@@ -638,39 +731,67 @@ pub fn decode(bytes: &[u8]) -> Result<ChangeSet> {
 }
 
 impl Store {
-    /// A note's CRDT text state as stored (sealed in encrypted vaults), for live collaboration.
-    pub fn note_text_state(&self, id: Uuid) -> Result<Option<Vec<u8>>> {
-        Ok(self
-            .conn
-            .query_row("SELECT crdt FROM notes WHERE id = ?1", [id.as_bytes()], |r| r.get(0))
-            .optional()?
-            .flatten())
+    /// A note's text CRDT as a plain Yjs/yrs update (unsealed), for the editor to load.
+    pub fn note_crdt(&self, id: Uuid) -> Result<Vec<u8>> {
+        let mut c = self.local_content(id)?.ok_or(Error::NotFound("note", id))?;
+        let in_step = match &c.state {
+            Some(s) => crdt::read_text(s)? == c.body,
+            None => false,
+        };
+        if !in_step {
+            self.refresh_crdt(id)?;
+            c = self.local_content(id)?.ok_or(Error::NotFound("note", id))?;
+        }
+        c.state.ok_or_else(|| Error::Invalid("note has no text state".into()))
     }
 
-    /// Merges a peer's live text state (as from [`Store::note_text_state`]) into a note.
-    /// Returns the new body if it changed. The peer stamps and syncs its own edit; this only
-    /// folds the text in. Encrypted notes need their vault unlocked.
-    pub fn merge_note_text(&self, id: Uuid, state: &[u8]) -> Result<Option<String>> {
-        let Some(local) = self.local_content(id)? else { return Ok(None) };
-        let Some(mine) = &local.state else { return Ok(None) };
-        let theirs = if local.encrypted {
-            let key = self.require_unlocked(local.vault)?;
-            crate::vault::open(key, &[id.as_bytes().as_slice(), b":crdt"].concat(), state)?.to_vec()
-        } else {
-            state.to_vec()
-        };
-        let (merged, text) = crdt::merge(mine, &theirs)?;
-        if text == local.body {
+    /// Merges a Yjs/yrs update into a note's text and stores the result. Returns the new body
+    /// if the text changed.
+    ///
+    /// `local` = an edit typed on this device: it bumps the change clock (so sync carries it),
+    /// keeps history and the modified time. Otherwise it's a peer's live edit, folded in quietly
+    /// (the peer stamps and syncs its own edit). Encrypted notes need their vault unlocked.
+    pub fn apply_note_update(&self, id: Uuid, update: &[u8], local: bool) -> Result<Option<String>> {
+        let Some(c) = self.local_content(id)? else { return Ok(None) };
+        if c.kind != "note" {
             return Ok(None);
         }
-        self.sync.applying.store(true, Ordering::SeqCst);
-        let guard = ApplyingGuard(&self.sync.applying);
-        self.write_content_raw(id, &text, Some(&merged))?;
-        drop(guard);
+        let mine = match c.state {
+            Some(s) => s,
+            None => self.note_crdt(id)?,
+        };
+        let (merged, text) = crdt::merge(&mine, update)?;
+        if merged == mine {
+            return Ok(None);
+        }
+        let changed = text != c.body;
+        if local {
+            let now = crate::util::now_ms();
+            if changed && !c.encrypted {
+                let note = self.get_note(id)?;
+                self.maybe_snapshot(&note, now)?;
+            }
+            self.write_content_raw(id, &text, Some(&merged))?;
+            self.conn.execute("UPDATE notes SET updated_at = ?2 WHERE id = ?1", params![id.as_bytes(), now])?;
+        } else {
+            self.sync.applying.store(true, Ordering::SeqCst);
+            let guard = ApplyingGuard(&self.sync.applying);
+            self.write_content_raw(id, &text, Some(&merged))?;
+            drop(guard);
+        }
+        if !changed {
+            return Ok(None);
+        }
         self.conn.execute("DELETE FROM embeddings WHERE note_id = ?1", [id.as_bytes()])?;
-        if !local.encrypted {
+        if !c.encrypted {
             self.sync_links(id, &text)?;
         }
         Ok(Some(text))
     }
+}
+
+/// Test helper: an update that changes a text state's content, made by Yjs client `client`.
+#[cfg(test)]
+pub(crate) fn crdt_set_text_for_tests(state: &[u8], text: &str, client: u64) -> Vec<u8> {
+    crdt::set_text(Some(state), text, client).unwrap()
 }

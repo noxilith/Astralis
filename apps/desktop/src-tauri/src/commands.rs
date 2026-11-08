@@ -164,7 +164,62 @@ slow_store_cmd!(create_vault(name: String, password: Option<String>) -> Vault
 slow_store_cmd!(unlock_vault(id: Uuid, password: String) -> Vault => |s| s.unlock_vault(id, &password));
 slow_store_cmd!(change_vault_password(id: Uuid, old: String, new: String) -> ()
     => |s| s.change_vault_password(id, &old, &new));
-slow_store_cmd!(delete_vault(id: Uuid, password: Option<String>) -> () => |s| s.delete_vault(id, password.as_deref()));
+/// Deletes one of our vaults; devices it was shared with drop their copies.
+#[tauri::command]
+pub async fn delete_vault(state: S<'_>, id: Uuid, password: Option<String>) -> Result<()> {
+    let st = state.inner().clone();
+    let members = blocking(move || {
+        let mut s = st.store.lock().unwrap();
+        let members: Vec<String> = s.vault_shares(id)?.into_iter().map(|x| x.peer).collect();
+        s.delete_vault(id, password.as_deref())?;
+        Ok(members)
+    })
+    .await?;
+    notify_shares(&state, &members);
+    Ok(())
+}
+
+// ---- shared vaults ----
+
+fn notify_shares(state: &SharedState, peers: &[String]) {
+    if let Some(net) = state.net.get() {
+        for p in peers {
+            net.shares_changed(p);
+        }
+    }
+}
+
+/// Shares one of our vaults with a paired device; it shows up there as its own vault.
+#[tauri::command]
+pub fn vault_share(state: S<'_>, vault_id: Uuid, peer: String) -> Result<Vault> {
+    let v = {
+        let s = state.store.lock().unwrap();
+        s.share_vault(vault_id, &peer)?;
+        s.get_vault(vault_id)?
+    };
+    notify_shares(&state, &[peer]);
+    Ok(v)
+}
+
+/// Stops sharing a vault with a device (its copy is removed there).
+#[tauri::command]
+pub fn vault_unshare(state: S<'_>, vault_id: Uuid, peer: String) -> Result<Vault> {
+    let v = {
+        let s = state.store.lock().unwrap();
+        s.unshare_vault(vault_id, &peer)?;
+        s.get_vault(vault_id)?
+    };
+    notify_shares(&state, &[peer]);
+    Ok(v)
+}
+
+/// Leaves a vault someone shared with us: our copy is removed, theirs is untouched.
+#[tauri::command]
+pub fn vault_leave(state: S<'_>, vault_id: Uuid) -> Result<()> {
+    let owner = state.store.lock().unwrap().leave_vault(vault_id)?;
+    notify_shares(&state, &[owner]);
+    Ok(())
+}
 
 // ---- settings ----
 store_cmd!(get_setting(key: String) -> Option<String> => |s| s.get_setting(&key));
@@ -300,6 +355,20 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         lock_all_vaults,
         change_vault_password,
         delete_vault,
+        vault_share,
+        vault_unshare,
+        vault_leave,
+        crate::cloud::google_status,
+        crate::cloud::google_set_client,
+        crate::cloud::google_connect,
+        crate::cloud::google_disconnect,
+        crate::cloud::cloud_create_vault,
+        crate::cloud::cloud_invites,
+        crate::cloud::cloud_invite,
+        crate::cloud::cloud_uninvite,
+        crate::cloud::cloud_join,
+        crate::cloud::cloud_sync_now,
+        crate::cloud::open_url,
         move_note_to_vault,
         get_setting,
         set_setting,
@@ -313,11 +382,14 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         tidy_note,
         p2p_status,
         p2p_set_name,
+        p2p_set_color,
         p2p_start_pairing,
         p2p_cancel_pairing,
         p2p_join,
         p2p_unpair,
-        live_text,
+        note_crdt,
+        note_edit,
+        live_awareness,
         live_presence,
         live_scene,
     ]
@@ -331,6 +403,8 @@ pub struct P2pStatus {
     ready: bool,
     id: String,
     name: String,
+    /// This device's color as collaborators see it.
+    color: String,
     peers: Vec<astralis_net::PeerStatus>,
 }
 
@@ -345,14 +419,20 @@ fn net_err(e: impl std::fmt::Display) -> Error {
 #[tauri::command]
 pub fn p2p_status(state: S<'_>) -> Result<P2pStatus> {
     Ok(match state.net.get() {
-        Some(net) => P2pStatus { ready: true, id: net.id(), name: net.name(), peers: net.peers() },
-        None => P2pStatus { ready: false, id: String::new(), name: String::new(), peers: vec![] },
+        Some(net) => P2pStatus { ready: true, color: net.color(), id: net.id(), name: net.name(), peers: net.peers() },
+        None => P2pStatus { ready: false, color: String::new(), id: String::new(), name: String::new(), peers: vec![] },
     })
 }
 
 #[tauri::command]
 pub fn p2p_set_name(state: S<'_>, name: String) -> Result<()> {
     net_of(&state)?.set_name(&name).map_err(net_err)
+}
+
+/// The color collaborators see for this device.
+#[tauri::command]
+pub fn p2p_set_color(state: S<'_>, color: String) -> Result<()> {
+    net_of(&state)?.set_color(&color).map_err(net_err)
 }
 
 #[derive(serde::Serialize)]
@@ -388,17 +468,28 @@ pub fn p2p_unpair(state: S<'_>, id: String) -> Result<()> {
     net_of(&state)?.unpair(&id).map_err(net_err)
 }
 
-/// A local edit while collaborating: save it and send the merged text state to connected devices.
+/// A note's text CRDT (a Yjs update) for the editor to load.
 #[tauri::command]
-pub fn live_text(state: S<'_>, note_id: Uuid, body: String) -> Result<()> {
-    let Some(net) = state.net.get().filter(|n| n.connected_count() > 0) else { return Ok(()) };
-    let text_state = {
-        let s = state.store.lock().unwrap();
-        s.update_note(note_id, NotePatch { title: None, body: Some(body) })?;
-        s.note_text_state(note_id)?
-    };
-    if let Some(st) = text_state {
-        net.broadcast(astralis_net::Live::Text { note_id: note_id.to_string(), state: st });
+pub fn note_crdt(state: S<'_>, note_id: Uuid) -> Result<Vec<u8>> {
+    state.store.lock().unwrap().note_crdt(note_id)
+}
+
+/// An edit typed in the editor (a Yjs update): store it, and send it to connected devices.
+/// Returns the note's new text if it changed.
+#[tauri::command]
+pub fn note_edit(state: S<'_>, note_id: Uuid, update: Vec<u8>) -> Result<Option<String>> {
+    let body = state.store.lock().unwrap().apply_note_update(note_id, &update, true)?;
+    if let Some(net) = state.net.get().filter(|n| n.connected_count() > 0) {
+        net.broadcast(astralis_net::Live::Update { note_id: note_id.to_string(), update });
+    }
+    Ok(body)
+}
+
+/// Names and carets in a note (a Yjs awareness update) for connected devices.
+#[tauri::command]
+pub fn live_awareness(state: S<'_>, note_id: Uuid, update: Vec<u8>) -> Result<()> {
+    if let Some(net) = state.net.get().filter(|n| n.connected_count() > 0) {
+        net.broadcast(astralis_net::Live::Awareness { note_id: note_id.to_string(), update });
     }
     Ok(())
 }

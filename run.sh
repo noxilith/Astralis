@@ -7,6 +7,9 @@
 #   ./run.sh build        Build release installers
 #   ./run.sh ui           Run just the frontend in a browser (with a mock backend)
 #   ./run.sh fetch-model  Download the in-app AI model (~90 MB, one time)
+#   ./run.sh seed-test-vault [profile]
+#                         Make a "Test galaxy" vault with 1,000 notes (default profile: galaxy-test;
+#                         open it with `./run.sh second galaxy-test`; "main" = your own data, app closed)
 #   ./run.sh check|clippy|fmt|clean
 #
 # Extra arguments are passed through to cargo / tauri.
@@ -40,6 +43,17 @@ need_webkit() {
 }
 
 need_npm() {
+    # Node installed with nvm is only on PATH in interactive shells; find it ourselves.
+    if ! command -v npx >/dev/null 2>&1; then
+        local nvm_bin
+        nvm_bin="$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1)"
+        if [[ -n "$nvm_bin" ]]; then
+            export PATH="$nvm_bin:$PATH"
+        else
+            echo "Node.js (npm/npx) not found. Install Node.js 20+ (e.g. via nvm) and try again." >&2
+            exit 1
+        fi
+    fi
     [[ -d "$APP/node_modules" ]] || (cd "$APP" && npm install)
 }
 
@@ -54,6 +68,21 @@ case "$cmd" in
     build)  need_webkit; need_npm; cd "$APP" && exec npx tauri build "$@" ;;
     ui)     need_npm; cd "$APP" && exec npm run dev -- --open "$@" ;;
     test)   exec cargo test "$@" ;;
+    seed-test-vault)
+            DATA="${XDG_DATA_HOME:-$HOME/.local/share}/app.astralis.desktop"
+            profile="${1:-galaxy-test}"
+            if [[ "$profile" == "main" ]]; then
+                if pgrep -f "target/(debug|release)/astralis-desktop" >/dev/null; then
+                    echo "Close Astralis first — it's using your main data." >&2
+                    exit 1
+                fi
+                db="$DATA/astralis.db"
+            else
+                db="$DATA/profile-$profile/astralis.db"
+            fi
+            cargo run -q -p astralis-core --example seed_test_vault -- "$db"
+            [[ "$profile" == "main" ]] || echo "Open it with:  ./run.sh second $profile   (needs ./run.sh app running)"
+            ;;
     check)  exec cargo check --all-targets "$@" ;;
     clippy) exec cargo clippy --all-targets "$@" ;;
     fmt)    exec cargo fmt --all "$@" ;;
@@ -69,5 +98,5 @@ case "$cmd" in
         done
         echo "Model ready in $MODEL_DIR"
         ;;
-    *) echo "Unknown command: $cmd (use app|test|build|ui|fetch-model|check|clippy|fmt|clean)" >&2; exit 1 ;;
+    *) echo "Unknown command: $cmd (use app|second|test|build|ui|fetch-model|seed-test-vault|check|clippy|fmt|clean)" >&2; exit 1 ;;
 esac

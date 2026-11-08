@@ -264,6 +264,9 @@ impl Store {
             .iter()
             .map(|s| s.to_string())
             .chain(std::iter::once(crate::sync::sync_migration()))
+            .chain(std::iter::once(crate::sync::SHARE_MIGRATION.to_string()))
+            .chain(std::iter::once(crate::sync::LEGACY_VAULTS_MIGRATION.to_string()))
+            .chain(std::iter::once(crate::cloud::CLOUD_MIGRATION.to_string()))
             .collect();
         for (i, sql) in all.iter().enumerate().skip(current as usize) {
             let tx = self.conn.transaction()?;

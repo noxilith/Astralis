@@ -31,3 +31,7 @@ apps/desktop/src-tauri/resources/models/*/
 
 # Local tooling
 .claude/
+
+# Google OAuth client (baked into builds; never commit)
+google-oauth.json
+client_secret_*.json

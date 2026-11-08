@@ -1,8 +1,11 @@
-import { useEffect, useState } from 'react'
-import { Laptop, Link2, Unlink, Wifi } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Laptop, Link2, Palette, Unlink, Wifi } from 'lucide-react'
 import { p2p, type P2pStatus } from '../api'
 import { useApp } from '../context'
-import { PAIRED, useCollab } from '../lib/collab'
+import { PAIRED, refreshMe, useCollab } from '../lib/collab'
+
+/** Same palette as the backend's default picks. */
+const COLORS = ['#8b7bff', '#4fd1a5', '#ff9f5a', '#ff6b81', '#6bb4ff', '#ffd166', '#c792ea', '#5ee7df']
 import { Modal, Spinner, useConfirm } from './ui'
 
 /** Settings → Devices: this device's name, pairing, and paired devices. */
@@ -15,6 +18,14 @@ export function Devices() {
   const [joining, setJoining] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const confirm = useConfirm()
+
+  // The native color input fires continuously while dragging; save shortly after it settles.
+  const colorTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pickColor = (color: string) => {
+    setStatus((s) => (s ? { ...s, color } : s))
+    if (colorTimer.current) clearTimeout(colorTimer.current)
+    colorTimer.current = setTimeout(() => p2p.setColor(color).then(refreshMe).catch(fail), 150)
+  }
 
   const refresh = () =>
     p2p
@@ -53,14 +64,39 @@ export function Devices() {
   return (
     <>
       <div className="field" style={{ maxWidth: 420 }}>
-        <label>This device's name (shown to collaborators)</label>
+        <label>Username (shown to collaborators)</label>
         <input
           className="input"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          onBlur={() => name.trim() && name !== status.name && p2p.setName(name).then(refresh).catch(fail)}
+          onBlur={() => name.trim() && name !== status.name && p2p.setName(name).then(refresh).then(refreshMe).catch(fail)}
           onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
         />
+      </div>
+      <div className="field">
+        <label>Your color (your caret, cursor and avatar for others)</label>
+        <div className="color-picker">
+          {COLORS.map((c) => (
+            <button
+              key={c}
+              className={'color-swatch' + (status.color === c ? ' active' : '')}
+              style={{ background: c }}
+              aria-label={`Use color ${c}`}
+              onClick={() => pickColor(c)}
+            />
+          ))}
+          <span
+            className={'color-swatch custom' + (COLORS.includes(status.color) ? '' : ' active')}
+            style={COLORS.includes(status.color) ? undefined : { background: status.color }}
+            title="Custom color"
+          >
+            <Palette size={13} />
+            <input type="color" value={status.color} onChange={(e) => pickColor(e.target.value)} />
+          </span>
+          <span className="color-preview" style={{ background: status.color }}>
+            {status.name}
+          </span>
+        </div>
       </div>
       <div className="row" style={{ marginBottom: 14 }}>
         <button
@@ -90,7 +126,7 @@ export function Devices() {
             className="btn ghost sm"
             title="Unpair"
             onClick={async () => {
-              if (await confirm.ask(`Unpair “${p.name}”? It will stop syncing with this device.`, 'Unpair')) {
+              if (await confirm.ask(`Unpair “${p.name}”? Both devices disconnect and stop syncing; pairing again needs a new code.`, 'Unpair')) {
                 p2p.unpair(p.id).then(refresh).catch(fail)
               }
             }}

@@ -21,25 +21,74 @@ pub enum Live {
         head: Option<u32>,
         pointer: Option<[f64; 2]>,
     },
-    /// A note's CRDT text state after a local edit.
+    /// An edit to a note's text: a Yjs update (v1) from the editor. Peers merge it into the
+    /// note and into their open editor.
     #[serde(rename_all = "camelCase")]
-    Text { note_id: String, state: Vec<u8> },
+    Update { note_id: String, update: Vec<u8> },
+    /// Who is in a note and where their caret is: a Yjs awareness update (names, colors, and
+    /// selections anchored to the text, so they move with edits).
+    #[serde(rename_all = "camelCase")]
+    Awareness { note_id: String, update: Vec<u8> },
+    /// The sender's display name and color (sent on connect and whenever they change).
+    #[serde(rename_all = "camelCase")]
+    Profile { name: String, color: String },
     /// A whiteboard's changed elements (Excalidraw JSON), for live drawing.
     #[serde(rename_all = "camelCase")]
     Scene { note_id: String, elements: String },
+}
+
+/// An invite to a cloud vault, read from the drive folder it was shared in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinRequest {
+    pub vault: uuid::Uuid,
+    pub email: String,
+    pub secret: String,
+}
+
+/// A shared vault, from the sender's point of view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VaultOffer {
+    pub vault: uuid::Uuid,
+    pub role: OfferRole,
+    pub seen: VersionVector,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum OfferRole {
+    /// "I own this vault and share it with you."
+    Mine,
+    /// "You own this vault; I'm in it."
+    Yours,
+    /// "I left your vault."
+    Left,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "camelCase")]
 pub(crate) enum Wire {
     /// First message from the dialing device.
-    Hello { name: String, pair_code: Option<String> },
+    Hello {
+        name: String,
+        pair_code: Option<String>,
+        /// Joining a cloud vault with an email invite (instead of pairing).
+        #[serde(default)]
+        join: Option<JoinRequest>,
+    },
     Welcome { name: String },
     Reject { reason: String },
-    /// "This is what I've seen" — the peer replies with what's missing.
-    Vv(VersionVector),
+    /// The vaults shared between us and what I've seen of each; the peer replies with what's
+    /// missing (and adds/drops shares to match).
+    Vaults { offers: Vec<VaultOffer> },
     Changes(ChangeSet),
     Live(Live),
+    /// "I unpaired you": forget me and hang up.
+    Unpair,
+    /// The owner of a shared cloud vault tells a member where it lives on the drive and the key
+    /// its drive files are sealed with (only ever sent over this encrypted link).
+    CloudInfo { vault: uuid::Uuid, provider: String, folder: String, key: Vec<u8> },
 }
 
 pub(crate) async fn write_frame(send: &mut SendStream, msg: &Wire) -> Result<()> {

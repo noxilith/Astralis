@@ -43,9 +43,16 @@ pub struct Vault {
     /// Plain vaults are always unlocked.
     pub unlocked: bool,
     pub note_count: i64,
+    /// The paired device that shared this vault with us; `None` = ours.
+    pub owner: Option<String>,
+    /// Devices we share this vault with (when it's ours).
+    pub shared_with: Vec<String>,
+    /// The cloud drive it lives on (e.g. "google-drive"), if it's a cloud vault.
+    pub cloud: Option<String>,
 }
 
-fn random<const N: usize>() -> Result<[u8; N]> {
+/// Cryptographically secure random bytes.
+pub fn random<const N: usize>() -> Result<[u8; N]> {
     let mut buf = [0u8; N];
     getrandom::fill(&mut buf).map_err(|e| Error::Crypto(e.to_string()))?;
     Ok(buf)
@@ -70,7 +77,8 @@ fn check_password(password: &str) -> Result<()> {
 }
 
 /// Encrypts `plain` → `nonce || ciphertext`.
-pub(crate) fn seal(key: &[u8; 32], aad: &[u8], plain: &[u8]) -> Result<Vec<u8>> {
+/// Seals bytes with XChaCha20-Poly1305 (random nonce prepended), bound to `aad`.
+pub fn seal(key: &[u8; 32], aad: &[u8], plain: &[u8]) -> Result<Vec<u8>> {
     let cipher =
         XChaCha20Poly1305::new_from_slice(key).map_err(|e| Error::Crypto(e.to_string()))?;
     let nonce_bytes = random::<NONCE_LEN>()?;
@@ -85,7 +93,8 @@ pub(crate) fn seal(key: &[u8; 32], aad: &[u8], plain: &[u8]) -> Result<Vec<u8>> 
     Ok(out)
 }
 
-pub(crate) fn open(key: &[u8; 32], aad: &[u8], sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+/// Opens what [`seal`] produced with the same key and `aad`.
+pub fn open(key: &[u8; 32], aad: &[u8], sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     if sealed.len() < NONCE_LEN {
         return Err(Error::Crypto("ciphertext too short".into()));
     }
@@ -126,12 +135,7 @@ impl Store {
             .optional()?;
         let plain = match plain {
             Some(id) => id,
-            None if vaults == 0 || orphans > 0 => {
-                let id = Uuid::now_v7();
-                self.insert_plain_vault(id, DEFAULT_VAULT_NAME)?;
-                self.set_setting(AUTO_VAULT_KEY, &id.to_string())?;
-                id.as_bytes().to_vec()
-            }
+            None if vaults == 0 || orphans > 0 => self.create_default_vault()?.as_bytes().to_vec(),
             None => return Ok(()),
         };
         if orphans > 0 {
@@ -141,6 +145,14 @@ impl Store {
             )?;
         }
         Ok(())
+    }
+
+    /// A fresh plain "Personal" vault.
+    pub(crate) fn create_default_vault(&self) -> Result<Uuid> {
+        let id = Uuid::now_v7();
+        self.insert_plain_vault(id, DEFAULT_VAULT_NAME)?;
+        self.set_setting(AUTO_VAULT_KEY, &id.to_string())?;
+        Ok(id)
     }
 
     fn insert_plain_vault(&self, id: Uuid, name: &str) -> Result<()> {
@@ -156,7 +168,10 @@ impl Store {
     pub fn default_vault(&self) -> Result<Uuid> {
         self.conn
             .query_row(
-                "SELECT id FROM vaults ORDER BY encrypted, created_at LIMIT 1",
+                // Our own vaults first (not ones shared with us), plain before encrypted.
+                "SELECT id FROM vaults v ORDER BY
+                    EXISTS (SELECT 1 FROM vault_shares s WHERE s.vault_id = v.id AND s.role = 'owner'),
+                    encrypted, created_at LIMIT 1",
                 [],
                 |r| uuid_col(r, 0),
             )
@@ -229,7 +244,8 @@ impl Store {
     pub fn list_vaults(&self) -> Result<Vec<Vault>> {
         let mut stmt = self.conn.prepare(
             "SELECT v.id, v.name, v.created_at, v.encrypted,
-                    (SELECT COUNT(*) FROM notes n WHERE n.vault_id = v.id AND n.archived_at IS NULL)
+                    (SELECT COUNT(*) FROM notes n WHERE n.vault_id = v.id AND n.archived_at IS NULL),
+                    (SELECT provider FROM cloud_vaults c WHERE c.vault_id = v.id)
              FROM vaults v ORDER BY v.encrypted, v.created_at",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -242,9 +258,22 @@ impl Store {
                 encrypted,
                 unlocked: !encrypted || self.vault_keys.contains_key(&id),
                 note_count: r.get(4)?,
+                owner: None,
+                shared_with: Vec::new(),
+                cloud: r.get(5)?,
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut vaults: Vec<Vault> = rows.collect::<rusqlite::Result<_>>()?;
+        for v in &mut vaults {
+            for s in self.vault_shares(v.id)? {
+                match s.role {
+                    crate::sync::ShareRole::Owner => v.owner = Some(s.peer),
+                    crate::sync::ShareRole::Member => v.shared_with.push(s.peer),
+                    crate::sync::ShareRole::Left => {}
+                }
+            }
+        }
+        Ok(vaults)
     }
 
     pub fn get_vault(&self, id: Uuid) -> Result<Vault> {
@@ -317,6 +346,9 @@ impl Store {
     /// Permanently deletes a vault and every note in it. Encrypted vaults require the password.
     /// The last remaining vault can't be deleted.
     pub fn delete_vault(&mut self, id: Uuid, password: Option<&str>) -> Result<()> {
+        if self.vault_owner(id)?.is_some() {
+            return Err(Error::invalid("this vault was shared with you; leave it instead"));
+        }
         if self.vault_is_encrypted(id)? {
             self.unwrap_dek(id, password.unwrap_or_default())?;
         }
@@ -328,6 +360,9 @@ impl Store {
         }
         self.conn
             .execute("DELETE FROM vaults WHERE id = ?1", [id.as_bytes()])?;
+        // Devices it was shared with drop their copies when they hear it's no longer shared.
+        self.conn.execute("DELETE FROM vault_shares WHERE vault_id = ?1", [id.as_bytes()])?;
+        self.forget_cloud_vault(id)?;
         self.vault_keys.remove(&id);
         self.prune_tags()?;
         Ok(())
@@ -374,56 +409,5 @@ impl Store {
         self.rehome_attachments(&note.body, target)?;
         self.refresh_crdt(note_id)?;
         self.get_note(note_id)
-    }
-}
-
-impl Store {
-    /// After syncing with another device: if this device's automatic first-run vault is still
-    /// empty and another vault can take its place, remove it — so pairing two fresh devices
-    /// doesn't leave two "Personal" vaults. Deterministic, so both devices make the same call.
-    pub(crate) fn collapse_empty_default_vault(&self) -> Result<()> {
-        let mine = match self.get_setting(AUTO_VAULT_KEY)? {
-            Some(id) => id.parse::<Uuid>().ok(),
-            // Databases from before this existed: the oldest plain "Personal" vault.
-            None => self
-                .conn
-                .query_row(
-                    "SELECT id FROM vaults WHERE encrypted = 0 AND name = ?1 ORDER BY created_at LIMIT 1",
-                    [DEFAULT_VAULT_NAME],
-                    |r| uuid_col(r, 0),
-                )
-                .optional()?,
-        };
-        let Some(mine) = mine else { return Ok(()) };
-        let used = |vault: Uuid| -> Result<bool> {
-            let n: i64 = self.conn.query_row(
-                "SELECT (SELECT COUNT(*) FROM notes WHERE vault_id = ?1)
-                      + (SELECT COUNT(*) FROM folders WHERE vault_id = ?1)
-                      + (SELECT COUNT(*) FROM attachments WHERE vault_id = ?1)",
-                [vault.as_bytes()],
-                |r| r.get(0),
-            )?;
-            Ok(n > 0)
-        };
-        if self.vault_is_encrypted(mine).unwrap_or(true) || used(mine)? {
-            return Ok(());
-        }
-        let others: Vec<Uuid> = {
-            let mut stmt = self.conn.prepare("SELECT id FROM vaults WHERE encrypted = 0 AND id != ?1")?;
-            stmt.query_map([mine.as_bytes()], |r| uuid_col(r, 0))?.collect::<rusqlite::Result<_>>()?
-        };
-        // Give way to a vault that has content, or (if all are empty) to the smaller id.
-        let mut replace = false;
-        for other in others {
-            if used(other)? || other < mine {
-                replace = true;
-                break;
-            }
-        }
-        if replace {
-            self.conn.execute("DELETE FROM vaults WHERE id = ?1", [mine.as_bytes()])?;
-            self.conn.execute("DELETE FROM settings WHERE key = ?1", [AUTO_VAULT_KEY])?;
-        }
-        Ok(())
     }
 }

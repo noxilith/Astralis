@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight, FilePlus2, FolderPlus, Hash, Lock, PenTool, Search, StickyNote, X } from 'lucide-react'
 import { api, type Folder, type Id, type Note, type TagCount, type Template } from '../api'
 import { useApp } from '../context'
-import { NoteRows, NoteTree } from './NoteTree'
+import { NoteRows, NoteTree, type NoteAction } from './NoteTree'
+import { SYNCED } from '../lib/collab'
 import { VaultSwitcher } from './VaultSwitcher'
 import { Empty, Modal, useConfirm, usePrompt } from './ui'
 
@@ -121,6 +122,53 @@ export function NotesNav() {
     }
   }
 
+  /** Tell an open editor its note changed here (it reloads the title, pin, archive state). */
+  const touched = (id: Id) => window.dispatchEvent(new CustomEvent(SYNCED, { detail: [id] }))
+
+  const noteAction = async (n: Note, action: NoteAction) => {
+    const name = n.title || 'Untitled'
+    switch (action) {
+      case 'open':
+        return openNote(n.id)
+      case 'rename': {
+        const title = await prompt.ask(n.kind === 'whiteboard' ? 'Rename whiteboard' : 'Rename note', 'Title', n.title)
+        if (title?.trim() && title !== n.title) folderAction(() => api.updateNote(n.id, { title }).then((x) => (app.publishNote(x), touched(n.id))))
+        return
+      }
+      case 'pin':
+        return folderAction(() => api.setPinned(n.id, !n.pinned).then((x) => (app.publishNote(x), touched(n.id))))
+      case 'duplicate':
+        return folderAction(async () => {
+          const full = await api.getNote(n.id)
+          const copy = await api.createNote({
+            kind: full.kind,
+            title: `${full.title || 'Untitled'} (copy)`,
+            body: full.body,
+            tags: full.tags,
+            vaultId: full.vaultId,
+            folderId: full.folderId,
+          })
+          openNote(copy.id)
+        })
+      case 'toTop':
+        return folderAction(() => api.moveNoteToFolder(n.id, null).then(app.publishNote))
+      case 'archive':
+        return folderAction(async () => {
+          await api.archiveNote(n.id)
+          if (noteId === n.id) touched(n.id)
+          app.toast(`Archived “${name}”`, { actions: [{ label: 'Undo', run: () => folderAction(() => api.unarchiveNote(n.id).then(() => touched(n.id))) }] })
+        })
+      case 'delete':
+        if (await confirm.ask(`Permanently delete “${name}”${n.kind === 'whiteboard' ? '' : ' and its history'}? This can't be undone.`, 'Delete forever')) {
+          folderAction(async () => {
+            await api.deleteNote(n.id)
+            if (noteId === n.id) app.setNoteId(null)
+          })
+        }
+        return
+    }
+  }
+
   const newFolder = async (parentId: Id | null) => {
     setNewMenuOpen(false)
     const name = await prompt.ask('New folder', parentId ? `Inside “${folderPath(folders, parentId)}”` : 'Folder name')
@@ -229,6 +277,7 @@ export function NotesNav() {
               if (name?.trim()) folderAction(() => api.renameFolder(f.id, name))
             }}
             onPinNote={(id) => folderAction(() => api.setPinned(id, true).then(app.publishNote))}
+            onNoteAction={noteAction}
             onDeleteFolder={async (f) => {
               const parent = f.parentId ? `“${folderPath(folders, f.parentId)}”` : 'the top level'
               if (await confirm.ask(`Delete folder “${f.name}”? Its notes and subfolders move to ${parent} — nothing is deleted.`, 'Delete folder')) {

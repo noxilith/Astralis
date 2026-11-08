@@ -1,11 +1,21 @@
 import { useMemo, useState, type DragEvent, type MouseEvent, type ReactNode } from 'react'
-import { ChevronDown, ChevronRight, Folder as FolderIcon, FolderOpen, FolderPlus, MoreHorizontal, Pencil, PenTool, Pin, StickyNote, Trash2 } from 'lucide-react'
+import { Archive, ChevronDown, ChevronRight, Copy, CornerLeftUp, ExternalLink, Folder as FolderIcon, FolderOpen, FolderPlus, MoreHorizontal, Pencil, PenTool, Pin, PinOff, StickyNote, Trash2 } from 'lucide-react'
 import type { Folder, Id, Note } from '../api'
+import { useCollab, type Presence } from '../lib/collab'
 
 export const noteIcon = (n: Note, size = 14) =>
   n.kind === 'whiteboard' ? <PenTool size={size} /> : <StickyNote size={size} />
 
 type Drag = { type: 'note' | 'folder'; id: Id }
+
+/** What the right-click menu on a note can do. */
+export type NoteAction = 'open' | 'rename' | 'pin' | 'duplicate' | 'toTop' | 'archive' | 'delete'
+
+/** Keeps a context menu on screen near the bottom/right edges. */
+const menuPos = (x: number, y: number, height: number) => ({
+  left: Math.min(x, window.innerWidth - 230),
+  top: Math.min(y, window.innerHeight - height - 8),
+})
 
 // Key in the expanded-folders set that marks the Pinned section as collapsed (open by default).
 export const PINNED_CLOSED = "__pinned_closed"
@@ -27,6 +37,24 @@ export interface NoteTreeProps {
   onDeleteFolder: (f: Folder) => void
   /** Dropping a note on the Pinned section pins it. */
   onPinNote?: (noteId: Id) => void
+  /** Right-click menu on a note. */
+  onNoteAction?: (note: Note, action: NoteAction) => void
+}
+
+/** Colored dots for the people editing a note (or something inside a folder). */
+function EditingDots({ people, inside }: { people?: Presence[]; inside?: boolean }) {
+  if (!people?.length) return null
+  const names = people.map((x) => x.name).join(', ')
+  return (
+    <span className={'editing-dots' + (inside ? ' inside' : '')} title={`${names} ${inside ? 'editing in here' : people.length > 1 ? 'are editing' : 'is editing'}`}>
+      {people.slice(0, 3).map((x) => (
+        <span key={x.peer} className="editing-dot" style={{ background: x.color }}>
+          {x.name.slice(0, 1).toUpperCase()}
+        </span>
+      ))}
+      {people.length > 3 && <span className="editing-more">+{people.length - 3}</span>}
+    </span>
+  )
 }
 
 const byNote = (a: Note, b: Note) =>
@@ -37,6 +65,11 @@ export function NoteTree(p: NoteTreeProps) {
   const [drag, setDrag] = useState<Drag | null>(null)
   const [dropTarget, setDropTarget] = useState<Id | "root" | "pinned" | null>(null)
   const [menu, setMenu] = useState<{ folder: Folder; x: number; y: number } | null>(null)
+  const [noteMenu, setNoteMenu] = useState<{ note: Note; x: number; y: number } | null>(null)
+  const noteAction = (a: NoteAction) => {
+    if (noteMenu) p.onNoteAction?.(noteMenu.note, a)
+    setNoteMenu(null)
+  }
 
   const { subfolders, notesIn } = useMemo(() => {
     const known = new Set(p.folders.map((f) => f.id))
@@ -55,6 +88,28 @@ export function NoteTree(p: NoteTreeProps) {
     notesIn.forEach((list) => list.sort(byNote))
     return { subfolders, notesIn }
   }, [p.folders, p.notes])
+
+  // Who's in which note right now — and, for folders, anywhere inside them.
+  const { presence } = useCollab()
+  const editors = useMemo(() => {
+    const byId = new Map<Id, Presence[]>()
+    const add = (id: Id, pr: Presence) => {
+      const list = byId.get(id) ?? []
+      if (!list.some((x) => x.peer === pr.peer)) byId.set(id, [...list, pr])
+    }
+    const parentOf = new Map(p.folders.map((f) => [f.id, f.parentId]))
+    for (const pr of presence) {
+      const note = pr.noteId ? p.notes.find((n) => n.id === pr.noteId) : undefined
+      if (!note) continue
+      add(note.id, pr)
+      const seen = new Set<Id>()
+      for (let f = note.folderId; f && !seen.has(f); f = parentOf.get(f) ?? null) {
+        seen.add(f)
+        add(f, pr)
+      }
+    }
+    return byId
+  }, [presence, p.notes, p.folders])
 
   const startDrag = (e: DragEvent, d: Drag) => {
     e.dataTransfer.setData('text/plain', d.id)
@@ -85,6 +140,7 @@ export function NoteTree(p: NoteTreeProps) {
   const openMenu = (e: MouseEvent, folder: Folder) => {
     e.preventDefault()
     e.stopPropagation()
+    setNoteMenu(null)
     setMenu({ folder, x: e.clientX, y: e.clientY })
   }
 
@@ -108,6 +164,7 @@ export function NoteTree(p: NoteTreeProps) {
           <span className="tree-caret">{open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</span>
           <span className="tree-icon folder">{open ? <FolderOpen size={14} /> : <FolderIcon size={14} />}</span>
           <span className="grow ellipsis">{f.name}</span>
+          <EditingDots people={editors.get(f.id)} inside />
           <button className="tree-action" aria-label="Folder actions" onClick={(e) => openMenu(e, f)}>
             <MoreHorizontal size={13} />
           </button>
@@ -126,10 +183,18 @@ export function NoteTree(p: NoteTreeProps) {
       onDragStart={(e) => startDrag(e, { type: 'note', id: n.id })}
       onDragEnd={endDrag}
       onClick={() => p.onSelectNote(n)}
+      onContextMenu={(e) => {
+        if (!p.onNoteAction) return
+        e.preventDefault()
+        e.stopPropagation()
+        setMenu(null)
+        setNoteMenu({ note: n, x: e.clientX, y: e.clientY })
+      }}
       title={n.title || 'Untitled'}
     >
       <span className="tree-icon">{noteIcon(n)}</span>
       <span className="grow ellipsis">{n.title || 'Untitled'}</span>
+      <EditingDots people={editors.get(n.id)} />
       {n.pinned && !keyPrefix && <Pin size={11} className="faint" />}
     </div>
   )
@@ -181,10 +246,41 @@ export function NoteTree(p: NoteTreeProps) {
       {renderPinned()}
       {renderChildren(null, 0)}
       {drag && <div className="tree-root-hint">Drop here to move to the top level</div>}
+      {noteMenu && (
+        <>
+          <div className="menu-backdrop" onClick={() => setNoteMenu(null)} onContextMenu={(e) => (e.preventDefault(), setNoteMenu(null))} />
+          <div className="menu" style={{ position: 'fixed', ...menuPos(noteMenu.x, noteMenu.y, 300), right: 'auto' }}>
+            <button onClick={() => noteAction('open')}>
+              <ExternalLink size={14} /> Open
+            </button>
+            <button onClick={() => noteAction('rename')}>
+              <Pencil size={14} /> Rename
+            </button>
+            <button onClick={() => noteAction('pin')}>
+              {noteMenu.note.pinned ? <PinOff size={14} /> : <Pin size={14} />} {noteMenu.note.pinned ? 'Unpin' : 'Pin to top'}
+            </button>
+            <button onClick={() => noteAction('duplicate')}>
+              <Copy size={14} /> Duplicate
+            </button>
+            {noteMenu.note.folderId && (
+              <button onClick={() => noteAction('toTop')}>
+                <CornerLeftUp size={14} /> Move to top level
+              </button>
+            )}
+            <div className="menu-sep" />
+            <button onClick={() => noteAction('archive')}>
+              <Archive size={14} /> Archive
+            </button>
+            <button className="danger" onClick={() => noteAction('delete')}>
+              <Trash2 size={14} /> Delete permanently
+            </button>
+          </div>
+        </>
+      )}
       {menu && (
         <>
           <div className="menu-backdrop" onClick={() => setMenu(null)} onContextMenu={(e) => (e.preventDefault(), setMenu(null))} />
-          <div className="menu" style={{ position: 'fixed', left: menu.x, top: menu.y, right: 'auto' }}>
+          <div className="menu" style={{ position: 'fixed', ...menuPos(menu.x, menu.y, 210), right: 'auto' }}>
             <button onClick={() => (setMenu(null), p.onNewNote(menu.folder.id, 'note'))}>
               <StickyNote size={14} /> New note here
             </button>
@@ -223,6 +319,7 @@ export function NoteRows({ notes, folders, selectedId, onSelect }: { notes: Note
       return parts.join(' / ')
     }
   }, [folders])
+  const { presence } = useCollab()
   return (
     <div className="tree">
       {notes.map((n) => (
@@ -230,6 +327,7 @@ export function NoteRows({ notes, folders, selectedId, onSelect }: { notes: Note
           <span className="tree-icon">{noteIcon(n)}</span>
           <span className="ellipsis">{n.title || 'Untitled'}</span>
           <span className="grow ellipsis small faint" style={{ textAlign: 'right' }}>{path(n.folderId)}</span>
+          <EditingDots people={presence.filter((x) => x.noteId === n.id)} />
         </div>
       ))}
     </div>

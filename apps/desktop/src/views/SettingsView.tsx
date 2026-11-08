@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Cloud } from 'lucide-react'
 import { api, type BrainStatus } from '../api'
 import { Devices } from '../components/Devices'
+import { GoogleDriveSettings } from '../components/GoogleDrive'
 
 export function SettingsView({ theme, setTheme }: { theme: 'dark' | 'light'; setTheme: (t: 'dark' | 'light') => void }) {
   const [grammar, setGrammar] = useState(true)
@@ -25,8 +26,8 @@ export function SettingsView({ theme, setTheme }: { theme: 'dark' | 'light'; set
       <div className="section">
         <h2>Devices</h2>
         <p className="small muted" style={{ marginTop: -6 }}>
-          Pair your devices to sync them directly — no server, end-to-end encrypted. While both are open you can
-          edit the same note or whiteboard together and see each other's cursor.
+          Pair with a device, then share a vault with it from the vault menu (<b>Share with…</b>). Only shared vaults
+          sync — directly, no server, end-to-end encrypted — and you edit them together live. Everything else stays private.
         </p>
         <Devices />
       </div>
@@ -34,13 +35,14 @@ export function SettingsView({ theme, setTheme }: { theme: 'dark' | 'light'; set
         <h2>Connected drives</h2>
         <p className="small muted" style={{ marginTop: -6 }}>
           Connect your own cloud storage to create cloud vaults. Each drive gets one <span className="kbd">Astralis/</span> folder with a
-          subfolder per vault. Coming soon.
+          subfolder per vault, holding only end-to-end encrypted data. Invite people by email; you then edit together live, P2P.
         </p>
-        {['Google Drive', 'Microsoft OneDrive', 'Box', 'Dropbox', 'pCloud'].map((p) => (
+        <GoogleDriveSettings />
+        {['Microsoft OneDrive', 'Box', 'Dropbox', 'pCloud'].map((p) => (
           <div key={p} className="row" style={{ padding: '7px 0', borderBottom: '1px solid var(--border)', maxWidth: 520 }}>
             <Cloud size={15} className="muted" />
             <span className="grow">{p}</span>
-            <span className="small faint">Not connected</span>
+            <span className="small faint">Coming soon</span>
             <button className="btn sm" disabled title="Coming soon">Connect</button>
           </div>
         ))}
@@ -87,7 +89,7 @@ export function SettingsView({ theme, setTheme }: { theme: 'dark' | 'light'; set
           <li>Everything is stored locally in a SQLite database in your app data folder.</li>
           <li>The AI runs on this device ({brain ? (brain.neural ? 'neural MiniLM model' : 'built-in lexical model') : '…'}). No note ever leaves your computer.</li>
           <li>Vault notes are encrypted at rest and excluded from search, links, history and the AI.</li>
-          <li>Cloud sync and collaboration are coming in a later version — always end-to-end encrypted, to storage you own.</li>
+          <li>Shared and cloud vaults sync end-to-end encrypted: device to device (P2P), and through your own drive, which only ever holds ciphertext. The vault key never goes to the drive.</li>
         </ul>
       </div>
       <div className="section">
