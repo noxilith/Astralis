@@ -32,6 +32,8 @@ env:
   CARGO_TERM_COLOR: always
   # llama.cpp without debug info: much smaller and faster to build.
   LLAMA_LIB_PROFILE: Release
+  # macOS 11 is the oldest that runs on Apple silicon (and llama.cpp needs 10.15 or newer).
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
   # Google Drive sign-in, baked in at build time (left out when the secrets aren't set).
   ASTRALIS_GOOGLE_CLIENT_ID: ${{ secrets.ASTRALIS_GOOGLE_CLIENT_ID }}
   ASTRALIS_GOOGLE_CLIENT_SECRET: ${{ secrets.ASTRALIS_GOOGLE_CLIENT_SECRET }}
@@ -122,7 +124,7 @@ jobs:
         # The Brain's server ships next to the app; macOS builds are ad-hoc signed (no Apple account).
         run: >
           npx tauri build --bundles ${{ matrix.bundles }}
-          --config '{"bundle":{"externalBin":["binaries/astralis-mcp"],"macOS":{"signingIdentity":"-"}}}'
+          --config '{"bundle":{"externalBin":["binaries/astralis-mcp"],"macOS":{"signingIdentity":"-","minimumSystemVersion":"11.0"}}}'
 
       - name: Collect the Linux files
         if: runner.os == 'Linux'
