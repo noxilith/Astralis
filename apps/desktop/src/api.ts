@@ -156,6 +156,7 @@ export interface TidyReport { duplicates: TidyPair[]; similar: TidyPair[]; stale
 export interface SkillStatus { target: 'claude' | 'codex'; path: string; state: 'missing' | 'installed' | 'outdated' }
 export interface BrainSetup { server: string; serverExists: boolean; args: string[]; mirror: string | null; vault: Id }
 export interface ChatTurn { role: 'user' | 'assistant'; text: string }
+export interface UpdateInfo { current: string; latest: string | null; canInstall: boolean; install: string; notes: string; page: string; size: number }
 export interface AssistantStatus { ready: boolean; downloading: boolean; loaded: boolean; quickPrompts: [string, string][] }
 export interface GoogleStatus { configured: boolean; builtin: boolean; clientId: string | null; email: string | null }
 export interface CloudInvite { email: string; acceptedBy: string | null }
@@ -281,6 +282,9 @@ export const api = {
   cloudJoin: () => call<string>('cloud_join'),
   cloudSyncNow: () => call<void>('cloud_sync_now'),
   openUrl: (url: string) => call<void>('open_url', { url }),
+  updateCheck: () => call<UpdateInfo>('update_check'),
+  /** Downloads and installs the newest release; on success the app restarts. */
+  updateInstall: () => call<void>('update_install'),
 
   // Ask Astralis (the local writing model)
   assistantStatus: () => call<AssistantStatus>('assistant_status'),

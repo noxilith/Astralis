@@ -567,6 +567,14 @@ a { color: var(--accent-strong); }
 .rail-badge { position: absolute; top: 2px; right: 1px; min-width: 14px; height: 14px; padding: 0 3px; border-radius: 7px; background: var(--accent); color: #fff; font-size: 9px; font-weight: 700; line-height: 14px; }
 .split-editor { grid-template-columns: minmax(0, 1fr) clamp(320px, 28vw, 420px); }
 
+/* ---------- Updates ---------- */
+.updates { display: flex; flex-direction: column; gap: 14px; max-width: 560px; }
+.update-card { display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); border-radius: 12px; background: color-mix(in srgb, var(--accent) 7%, var(--bg-elev)); }
+.update-notes summary { cursor: pointer; color: var(--text-muted); }
+.update-notes .preview { padding: 8px 0 0; max-width: none; font-size: 13px; line-height: 1.6; }
+.update-notes .preview > :first-child { margin-top: 0; }
+.spin { animation: spin 0.9s linear infinite; }
+
 /* ---------- Side panel: details and chat ---------- */
 .side-pane { display: flex; flex-direction: column; overflow: hidden; }
 .side-tabs { flex: none; display: flex; gap: 4px; margin: 10px 12px 0; padding: 3px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); }

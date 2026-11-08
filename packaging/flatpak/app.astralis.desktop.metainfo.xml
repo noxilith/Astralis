@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>app.astralis.desktop</id>
+  <name>Astralis</name>
+  <summary>Private notes with a built-in AI that runs on your own computer</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.noxilith">
+    <name>Noxilith</name>
+  </developer>
+  <description>
+    <p>
+      Astralis is a local-first notes app: notes, whiteboards, tasks and a calendar in vaults you
+      can encrypt, with an AI that runs entirely on your computer.
+    </p>
+    <ul>
+      <li>Ask Astralis: an honest AI that critiques ideas, judges whether they'll pay off, and plans and writes notes</li>
+      <li>The Brain: project memory for AI coding agents, so they spend fewer tokens</li>
+      <li>Peer-to-peer sync, live editing and shared vaults, plus end-to-end encrypted Google Drive</li>
+      <li>A 3D graph where every vault is a galaxy and linked notes form solar systems</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">app.astralis.desktop.desktop</launchable>
+  <url type="homepage">https://github.com/noxilith/Astralis</url>
+  <url type="bugtracker">https://github.com/noxilith/Astralis/issues</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.0.0" date="2026-11-08"/>
+  </releases>
+</component>

@@ -14,6 +14,7 @@ import { GraphView } from './views/GraphView'
 import { BrainView } from './views/BrainView'
 import { TemplatesView } from './views/TemplatesView'
 import { SettingsView } from './views/SettingsView'
+import { useStartupUpdateCheck } from './components/Updates'
 import { MINUTE } from './lib/time'
 
 type Theme = 'dark' | 'light'
@@ -21,6 +22,9 @@ type Theme = 'dark' | 'light'
 function Shell() {
   const app = useApp()
   const { view, setView, paletteOpen, setPaletteOpen, toast, fail, bump, openTask, createNote, refreshVaults } = app
+
+  // Tells you when a newer Astralis is out (Settings → Updates installs it).
+  useStartupUpdateCheck()
 
   // Peer-to-peer: device list, live presence, and refresh views when synced changes land.
   useEffect(() => startCollab(() => (bump(), void refreshVaults())), [bump, refreshVaults])

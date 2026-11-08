@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Astralis
+GenericName=Notes
+Comment=Private notes with a built-in AI that runs on your own computer
+Exec=astralis %U
+Icon=app.astralis.desktop
+Terminal=false
+Categories=Office;Utility;
+Keywords=notes;markdown;wiki;tasks;ai;
+StartupNotify=true

@@ -1,0 +1,44 @@
+# Astralis as a Flatpak. Built by the release workflow from the Linux build (the .deb Tauri
+# makes), on the GNOME runtime, which carries the WebKitGTK the app's window needs.
+app-id: app.astralis.desktop
+runtime: org.gnome.Platform
+runtime-version: '48'
+sdk: org.gnome.Sdk
+command: astralis
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # The Brain's Markdown mirror and the files you attach live in your home folder.
+  - --filesystem=home
+  - --talk-name=org.freedesktop.Notifications
+  # In-app updates install the new bundle with the host's flatpak.
+  - --talk-name=org.freedesktop.Flatpak
+modules:
+  - name: astralis
+    buildsystem: simple
+    sources:
+      - type: file
+        path: astralis.deb
+      - type: file
+        path: app.astralis.desktop.desktop
+      - type: file
+        path: app.astralis.desktop.metainfo.xml
+    build-commands:
+      - ar -x astralis.deb
+      - tar -xf data.tar.*
+      # The program (whatever Tauri named it) as /app/bin/astralis.
+      - install -Dm755 "$(find usr/bin -maxdepth 1 -type f | head -n1)" /app/bin/astralis
+      # Bundled resources (the note-embedding model). Tauri looks next to the program for them.
+      - if [ -d usr/lib/Astralis ]; then mkdir -p /app/lib && cp -r usr/lib/Astralis /app/lib/Astralis && ln -s ../lib/Astralis/models /app/bin/models; fi
+      # The Brain's server for AI agents, if the build carried it.
+      - if [ -f usr/bin/astralis-mcp ]; then install -Dm755 usr/bin/astralis-mcp /app/bin/astralis-mcp; fi
+      - install -Dm644 app.astralis.desktop.desktop /app/share/applications/app.astralis.desktop.desktop
+      - install -Dm644 app.astralis.desktop.metainfo.xml /app/share/metainfo/app.astralis.desktop.metainfo.xml
+      - |
+        for icon in usr/share/icons/hicolor/*/apps/*.png; do
+          size=$(basename "$(dirname "$(dirname "$icon")")")
+          install -Dm644 "$icon" "/app/share/icons/hicolor/$size/apps/app.astralis.desktop.png"
+        done

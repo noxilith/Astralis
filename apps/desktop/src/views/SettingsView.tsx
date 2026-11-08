@@ -3,6 +3,7 @@ import { Cloud } from 'lucide-react'
 import { api, type BrainStatus } from '../api'
 import { Devices } from '../components/Devices'
 import { GoogleDriveSettings } from '../components/GoogleDrive'
+import { UpdatesSection } from '../components/Updates'
 
 export function SettingsView({ theme, setTheme }: { theme: 'dark' | 'light'; setTheme: (t: 'dark' | 'light') => void }) {
   const [grammar, setGrammar] = useState(true)
@@ -82,6 +83,10 @@ export function SettingsView({ theme, setTheme }: { theme: 'dark' | 'light'; set
             For smarter matching, install the neural model: <span className="kbd">./run.sh fetch-model</span>
           </p>
         )}
+      </div>
+      <div className="section">
+        <h2>Updates</h2>
+        <UpdatesSection />
       </div>
       <div className="section">
         <h2>Privacy</h2>

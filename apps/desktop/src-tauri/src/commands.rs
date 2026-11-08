@@ -374,6 +374,8 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         crate::assistant_cmds::assistant_chat,
         crate::assistant_cmds::assistant_cancel,
         crate::assistant_cmds::assistant_unload,
+        crate::update::update_check,
+        crate::update::update_install,
         crate::brain_cmds::brain_projects,
         crate::brain_cmds::brain_memories,
         crate::brain_cmds::brain_set_reviewed,

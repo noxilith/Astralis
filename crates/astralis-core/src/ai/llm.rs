@@ -61,9 +61,10 @@ fn threads() -> i32 {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 16) as i32
 }
 
-/// Whether to run on the graphics chip (Vulkan on Linux and Windows, Metal on macOS). Off until
-/// it's been tested on more hardware: on one laptop a GPU run coincided with a full system freeze.
-/// `ASTRALIS_LLM_GPU=1` turns it on.
+/// Whether to run on the graphics chip. That needs a build with the `gpu-vulkan` or `gpu-metal`
+/// feature (`ASTRALIS_GPU=1 ./run.sh app`), and is still off until it's been tested on more
+/// hardware: on one laptop a GPU run coincided with a full system freeze. `ASTRALIS_LLM_GPU=1`
+/// turns it on.
 pub fn use_gpu() -> bool {
     std::env::var("ASTRALIS_LLM_GPU").is_ok_and(|v| v == "1")
 }

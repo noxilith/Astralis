@@ -288,6 +288,9 @@ const handlers: Record<string, (a: Args) => unknown> = {
       : "# Starfield Farm\n\nA cozy farming game set on small planets, where gravity and day length change how crops grow.\n\n## Features\n- Planet-hopping farms with different gravity\n- Crops that adapt to each planet\n- Trading between colonies\n\n## Plan\n1. **Weeks 1–2:** prototype low-gravity crop growth\n2. **Weeks 3–6:** one planet, full farming loop\n3. **Weeks 7–10:** second planet + trading\n4. **Weeks 11–12:** polish, Steam page, demo\n\n**First step today:** sketch the crop-growth rules on paper.",
   assistant_cancel: () => undefined,
   assistant_unload: () => undefined,
+  // Updates (pretend: a newer release is out).
+  update_check: () => ({ current: '1.0.0', latest: '1.1.0', canInstall: true, install: 'AppImage', notes: '## What’s new\n- Faster galaxy graph\n- Ask Astralis remembers chats\n- Fixes for shared vaults', page: 'https://github.com/noxilith/Astralis/releases/latest', size: 98_400_000 }),
+  update_install: () => new Promise((_, reject) => setTimeout(() => reject(new Error('(Preview) Updating only works in the desktop app.')), 1500)),
   // The Brain (pretend).
   brain_projects: () => [
     { folder: 'me', name: 'Me', count: 2, newCount: 0 },

@@ -1,6 +1,6 @@
 [package]
 name = "astralis-desktop"
-version = "0.1.0"
+version = "1.0.0"
 license = "GPL-3.0-or-later"
 description = "Astralis — notes & productivity"
 edition = "2024"
@@ -12,6 +12,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 serde_json = "1"
 tauri-build = { version = "2", features = [] }
+
+[features]
+# Ask Astralis on the graphics chip; see crates/astralis-core/Cargo.toml.
+gpu-vulkan = ["astralis-core/gpu-vulkan"]
+gpu-metal = ["astralis-core/gpu-metal"]
 
 [dependencies]
 astralis-core = { path = "../../../crates/astralis-core" }
@@ -25,3 +30,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["serde", "v7"] }
 base64 = "0.23.1"
+# The updater: checks downloads against the release's SHA-256 sums, unpacks the macOS app.
+sha2 = "0.10"
+zip = { version = "7", default-features = false, features = ["deflate"] }

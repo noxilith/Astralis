@@ -13,6 +13,8 @@ chacha20poly1305 = "0.11.0"
 chrono = { version = "0.4.45", features = ["serde"] }
 getrandom = "0.4.3"
 harper-core = "3.0.0"
+# The "Ask Astralis" model runner. Runs on the CPU; the gpu-* features below add the graphics chip.
+llama-cpp-2 = { version = "0.1.161", optional = true }
 rusqlite = { version = "0.41.1", features = ["bundled", "functions"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
@@ -22,16 +24,13 @@ uuid = { version = "1.29.1", features = ["serde", "v7"] }
 yrs = "0.28.1"
 zeroize = "1.9.1"
 
-# The "Ask Astralis" model runner, on the graphics chip: Vulkan (Intel, AMD, NVIDIA) on Linux and
-# Windows, Metal on macOS.
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-llama-cpp-2 = { version = "0.1.161", optional = true, features = ["vulkan"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-llama-cpp-2 = { version = "0.1.161", optional = true, features = ["metal"] }
 
 [features]
 default = ["ml"]
 # The in-app models: embeddings (candle) and the "Ask Astralis" writer (llama.cpp). Without it
 # the Brain uses a built-in lexical embedder and Ask Astralis is unavailable.
 ml = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:llama-cpp-2"]
+# Ask Astralis on the graphics chip (off in releases: Vulkan builds won't start on a computer without
+# Vulkan drivers). Vulkan for Linux and Windows, Metal for macOS.
+gpu-vulkan = ["ml", "llama-cpp-2/vulkan"]
+gpu-metal = ["ml", "llama-cpp-2/metal"]

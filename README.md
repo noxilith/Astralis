@@ -14,11 +14,12 @@
   <img src="https://img.shields.io/badge/Rust-2024-dea584?style=flat-square&logo=rust&logoColor=white" alt="Rust">
   <img src="https://img.shields.io/badge/Tauri-2-24c8db?style=flat-square&logo=tauri&logoColor=white" alt="Tauri 2">
   <img src="https://img.shields.io/badge/React-TypeScript-61dafb?style=flat-square&logo=react&logoColor=white" alt="React + TypeScript">
-  <img src="https://img.shields.io/badge/platforms-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-4fd1a5?style=flat-square" alt="Linux, macOS, Windows">
+  <img src="https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux%20%C2%B7%20iOS%20soon-4fd1a5?style=flat-square" alt="Windows, macOS, Linux; iOS coming">
   <img src="https://img.shields.io/badge/AI-100%25%20on--device-ffb547?style=flat-square" alt="AI runs on your device">
 </p>
 
 <p align="center">
+  <a href="#-download">Download</a> ·
   <a href="#-features">Features</a> ·
   <a href="#-your-notes-as-a-universe">The graph</a> ·
   <a href="#-ask-astralis">Ask Astralis</a> ·
@@ -33,6 +34,28 @@
 </p>
 
 ---
+
+## 📦 Download
+
+Get the newest version from the [**releases page**](https://github.com/noxilith/Astralis/releases/latest).
+Every platform has an installer and a portable version that runs without installing.
+
+| | Install | Portable |
+|---|---|---|
+| **Windows** (10, 11) | `…_windows_x64_setup.exe`, an install wizard | `…_windows_x64_portable.exe`, a single file |
+| **macOS** (Apple silicon) | `…_macos_arm64.dmg`: drag Astralis to Applications | `…_macos_arm64.app.zip`: unzip and run |
+| **Linux** (x64) | `…_linux_x64.flatpak`: `flatpak install` it, or open it in your software center | `…_linux_x64.AppImage`: make it executable and run |
+| **iOS** | Coming eventually | |
+
+**Astralis keeps itself up to date.** It checks GitHub for a newer release when it starts (you
+can turn that off) and installs it in whichever form you have, then restarts. Updates are
+checked against the release's SHA-256 checksums before anything is replaced. Settings →
+Updates shows your version and lets you check any time.
+
+> [!NOTE]
+> The macOS build isn't notarized by Apple yet, so the first time, right-click Astralis and
+> choose **Open**. Windows may show a SmartScreen warning for the same reason; choose
+> **More info → Run anyway**.
 
 ## ✨ Features
 
@@ -111,8 +134,8 @@ honest rather than nice:
 | **Write it up** | The whole note rewritten. It can replace the note or be added to it, and it's undoable |
 
 The model is a one-time 2.4 GB download. It loads on your first message and is freed when you
-close the panel. GPU support (Vulkan, or Metal on macOS) is built in and off by default for
-now; set `ASTRALIS_LLM_GPU=1` to try it.
+close the panel. It runs on the CPU; graphics-chip support (Vulkan, or Metal on macOS) is an
+early build option, `ASTRALIS_GPU=1 ./run.sh app`, then `ASTRALIS_LLM_GPU=1` to turn it on.
 
 ## 🧠 The Brain
 
@@ -164,19 +187,23 @@ The first build compiles llama.cpp and takes several minutes; `run.sh` keeps it 
 laptop's memory.
 
 <details>
-<summary><b>Requirements</b>: Rust, Node.js 20+, CMake, a C++ toolchain, Vulkan headers and <code>glslc</code></summary>
+<summary><b>Requirements</b>: Rust, Node.js 20+, CMake and a C++ toolchain</summary>
 
 <br>
 
 | System | Install |
 |---|---|
-| Arch | `sudo pacman -S --needed webkit2gtk-4.1 base-devel cmake vulkan-headers shaderc spirv-headers` |
-| Debian / Ubuntu | `sudo apt install libwebkit2gtk-4.1-dev build-essential cmake libvulkan-dev glslc spirv-headers` |
-| macOS | Xcode command line tools and `brew install cmake` (uses Metal, so no Vulkan needed) |
-| Windows | Visual Studio Build Tools (C++), CMake, and the [Vulkan SDK](https://vulkan.lunarg.com/) |
+| Arch | `sudo pacman -S --needed webkit2gtk-4.1 base-devel cmake clang` |
+| Debian / Ubuntu | `sudo apt install libwebkit2gtk-4.1-dev build-essential cmake libclang-dev` |
+| macOS | Xcode command line tools and `brew install cmake` |
+| Windows | Visual Studio Build Tools (C++), CMake and LLVM |
 
-If SPIRV-Headers isn't installed, `run.sh` fetches it into `.deps/` on the first build. Set
-`CARGO_BUILD_JOBS` higher than the default 4 if you have RAM to spare.
+Set `CARGO_BUILD_JOBS` higher than the default 4 if you have RAM to spare.
+
+**Graphics-chip build** (`ASTRALIS_GPU=1`): on Linux and Windows also install the Vulkan headers
+and `glslc` (Arch: `vulkan-headers shaderc spirv-headers`; Debian/Ubuntu: `libvulkan-dev glslc
+spirv-headers`; Windows: the [Vulkan SDK](https://vulkan.lunarg.com/)). If SPIRV-Headers isn't
+installed, `run.sh` fetches it into `.deps/`. macOS uses Metal and needs nothing extra.
 
 </details>
 
@@ -191,7 +218,7 @@ If SPIRV-Headers isn't installed, `run.sh` fetches it into `.deps/` on the first
 | `./run.sh second [profile]` | A second window with its own profile, to try sync on one machine |
 | `./run.sh ui` | Frontend only, in a browser, with a mock backend |
 | `./run.sh test` | Rust test suite |
-| `./run.sh build` | Release installers |
+| `./run.sh build` | Release installers (the official ones are built by GitHub Actions on each version tag) |
 | `./run.sh fetch-model` | The note-embedding model (~90 MB), for related notes and auto-tags |
 | `./run.sh seed-test-vault [profile]` | A 1,000-note test vault, for the graph |
 | `./run.sh seed-test-brain [--fresh] [profile]` | 1,000 test memories in the Brain |
@@ -228,7 +255,7 @@ flowchart LR
 
 ## 🧭 Planned
 
-More cloud drives (OneDrive, Dropbox, Box, pCloud), biometric unlock, voice-to-text, and a
+An iOS app, more cloud drives (OneDrive, Dropbox, Box, pCloud), biometric unlock, voice-to-text, and a
 fine-tuned Astralis model.
 
 ---

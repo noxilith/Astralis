@@ -2,6 +2,7 @@ mod assistant_cmds;
 mod brain_cmds;
 mod cloud;
 mod commands;
+pub mod update;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -108,6 +109,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            // Leftovers from an update that just finished (the old .exe or .app).
+            update::clean_up_after_update();
             // ASTRALIS_PROFILE=name runs a separate profile (own database and device identity),
             // e.g. to try sync with two windows on one computer.
             let mut data_dir = app.path().app_data_dir()?;

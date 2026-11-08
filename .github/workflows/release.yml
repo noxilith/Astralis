@@ -1,0 +1,220 @@
+# Builds Astralis for every platform when a version tag (v1.2.3) is pushed, and puts the files in
+# a draft release for a last look before it's published.
+#
+#   Windows  Astralis_<v>_windows_x64_setup.exe     install wizard
+#            Astralis_<v>_windows_x64_portable.exe  one file, no install
+#   Linux    Astralis_<v>_linux_x64.flatpak          install
+#            Astralis_<v>_linux_x64.AppImage         portable
+#   macOS    Astralis_<v>_macos_arm64.dmg            install (drag to Applications)
+#            Astralis_<v>_macos_arm64.app.zip        portable, and what the in-app updater uses
+#   all      astralis-mcp_<v>_<platform>             the Brain's server for AI agents
+#            SHA256SUMS                              checksums; the in-app updater checks them
+#
+# The names deliberately differ from EloraNotes' (…-linux-x86_64.AppImage), which shared this
+# repository: its updater must never mistake an Astralis release for its own.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v1.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # llama.cpp without debug info: much smaller and faster to build.
+  LLAMA_LIB_PROFILE: Release
+  # Google Drive sign-in, baked in at build time (left out when the secrets aren't set).
+  ASTRALIS_GOOGLE_CLIENT_ID: ${{ secrets.ASTRALIS_GOOGLE_CLIENT_ID }}
+  ASTRALIS_GOOGLE_CLIENT_SECRET: ${{ secrets.ASTRALIS_GOOGLE_CLIENT_SECRET }}
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # An older Ubuntu keeps the glibc requirement low, so it runs on older distributions too.
+          - os: ubuntu-22.04
+            platform: linux_x64
+            bundles: appimage,deb
+          - os: windows-latest
+            platform: windows_x64
+            bundles: nsis
+          - os: macos-14
+            platform: macos_arm64
+            bundles: app,dmg
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Version
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          APP=$(grep -m1 '^version' apps/desktop/src-tauri/Cargo.toml | cut -d'"' -f2)
+          if [ "$APP" != "$VERSION" ]; then
+            echo "::error::The tag is $TAG but the app's version is $APP (apps/desktop/src-tauri/Cargo.toml)."
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            patchelf build-essential cmake clang libclang-dev file libfuse2
+
+      - name: Point bindgen at LLVM (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Note-embedding model (bundled, for related notes and auto-tags)
+        shell: bash
+        run: ./run.sh fetch-model
+
+      - name: The Brain's server for AI agents
+        shell: bash
+        run: |
+          cargo build --release --locked -p astralis-mcp
+          TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
+          EXT=""; [ "$RUNNER_OS" = Windows ] && EXT=".exe"
+          mkdir -p apps/desktop/src-tauri/binaries dist
+          cp "target/release/astralis-mcp$EXT" "apps/desktop/src-tauri/binaries/astralis-mcp-$TRIPLE$EXT"
+          cp "target/release/astralis-mcp$EXT" "dist/astralis-mcp_${VERSION}_${{ matrix.platform }}$EXT"
+
+      - name: Build Astralis
+        working-directory: apps/desktop
+        shell: bash
+        env:
+          # linuxdeploy's strip chokes on newer binaries.
+          NO_STRIP: "true"
+        # The Brain's server ships next to the app; macOS builds are ad-hoc signed (no Apple account).
+        run: >
+          npx tauri build --bundles ${{ matrix.bundles }}
+          --config '{"bundle":{"externalBin":["binaries/astralis-mcp"],"macOS":{"signingIdentity":"-"}}}'
+
+      - name: Collect the Linux files
+        if: runner.os == 'Linux'
+        run: |
+          cp target/release/bundle/appimage/*.AppImage "dist/Astralis_${VERSION}_linux_x64.AppImage"
+          # The Flatpak is made from this in the next job; it isn't published itself.
+          cp target/release/bundle/deb/*.deb dist/astralis.deb
+
+      - name: Collect the Windows files
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cp target/release/bundle/nsis/*-setup.exe "dist/Astralis_${VERSION}_windows_x64_setup.exe"
+          EXE=$(ls target/release/astralis-desktop.exe target/release/Astralis.exe 2>/dev/null | head -n1)
+          cp "$EXE" "dist/Astralis_${VERSION}_windows_x64_portable.exe"
+
+      - name: Collect the macOS files
+        if: runner.os == 'macOS'
+        run: |
+          cp target/release/bundle/dmg/*.dmg "dist/Astralis_${VERSION}_macos_arm64.dmg"
+          cd target/release/bundle/macos
+          ditto -c -k --keepParent Astralis.app "$GITHUB_WORKSPACE/dist/Astralis_${VERSION}_macos_arm64.app.zip"
+
+      - run: ls -l dist
+        shell: bash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  flatpak:
+    name: Build (Flatpak)
+    needs: build
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-48
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Version
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux_x64
+          path: linux
+
+      - run: cp linux/astralis.deb packaging/flatpak/astralis.deb
+
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: Astralis_${{ env.VERSION }}_linux_x64.flatpak
+          manifest-path: packaging/flatpak/app.astralis.desktop.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+          upload-artifact: false
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: Astralis_*_linux_x64.flatpak
+          if-no-files-found: error
+
+  release:
+    name: Draft the release
+    needs: [build, flatpak]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: files
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: files
+        run: |
+          rm -f astralis.deb
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          gh release create "$TAG" files/* --repo "$GITHUB_REPOSITORY" --draft \
+            --title "Astralis $VERSION" --notes "Astralis $VERSION"

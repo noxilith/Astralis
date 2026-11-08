@@ -75,7 +75,9 @@ need_npm() {
     [[ -d "$APP/node_modules" ]] || (cd "$APP" && npm install)
 }
 
-# llama.cpp runs "Ask Astralis" on the graphics chip through Vulkan. Building that needs the
+# ASTRALIS_GPU=1 builds Ask Astralis with graphics-chip support (Vulkan; Metal on macOS). It's off by
+# default, and in releases: a Vulkan build won't start on a computer without Vulkan drivers.
+# The Vulkan build of llama.cpp needs the
 # SPIRV-Headers (header-only, from Khronos); when the system doesn't have them, fetch them once
 # into .deps/ and point the build there (llama.cpp looks under $VULKAN_SDK).
 need_spirv() {
@@ -127,9 +129,15 @@ EOF
 cmd="${1:-test}"
 [ $# -gt 0 ] && shift
 
-case "$cmd" in
-    app|build|test|check|clippy|seed-test-brain|seed-test-vault) need_spirv ;;
-esac
+GPU_FEATURE=()
+if [[ "${ASTRALIS_GPU:-}" == 1 ]]; then
+    if [[ "$(uname)" == "Darwin" ]]; then
+        GPU_FEATURE=(--features gpu-metal)
+    else
+        need_spirv
+        GPU_FEATURE=(--features gpu-vulkan)
+    fi
+fi
 
 case "$cmd" in
     app)    need_webkit; need_npm
@@ -138,11 +146,11 @@ case "$cmd" in
             echo "Building the Brain server (astralis-mcp)…"
             cargo build -p astralis-mcp
             echo "Starting Astralis…"
-            cd "$APP" && exec npx tauri dev "$@" ;;
+            cd "$APP" && exec npx tauri dev "${GPU_FEATURE[@]}" "$@" ;;
     second) # A second window with its own profile (own notes + device identity) to try P2P on one machine.
             # Needs `./run.sh app` running (it serves the UI).
             need_webkit; ASTRALIS_PROFILE="${1:-second}" exec "$ROOT/target/debug/astralis-desktop" ;;
-    build)  need_webkit; need_npm; cd "$APP" && exec npx tauri build "$@" ;;
+    build)  need_webkit; need_npm; cd "$APP" && exec npx tauri build "${GPU_FEATURE[@]}" "$@" ;;
     ui)     need_npm; cd "$APP" && exec npm run dev -- --open "$@" ;;
     test)   exec cargo test "$@" ;;
     seed-test-brain)

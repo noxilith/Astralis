@@ -38,3 +38,6 @@ client_secret_*.json
 
 # Build-only dependencies fetched by run.sh
 /.deps/
+
+# Built in CI (the Brain server shipped next to the app)
+apps/desktop/src-tauri/binaries/
