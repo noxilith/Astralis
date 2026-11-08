@@ -1,6 +1,7 @@
 [package]
 name = "astralis-mcp"
 version = "0.1.0"
+license = "GPL-3.0-or-later"
 edition = "2024"
 description = "The Astralis Brain as an MCP server: token-cheap project memory for Claude Code, Codex, Cursor and other AI agents"
 

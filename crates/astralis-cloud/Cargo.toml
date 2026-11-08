@@ -1,6 +1,7 @@
 [package]
 name = "astralis-cloud"
 version = "0.1.0"
+license = "GPL-3.0-or-later"
 edition = "2024"
 description = "Astralis cloud vaults: Google Drive sign-in, drive client, and end-to-end encrypted sync"
 

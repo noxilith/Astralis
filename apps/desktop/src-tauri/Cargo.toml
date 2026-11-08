@@ -1,6 +1,7 @@
 [package]
 name = "astralis-desktop"
 version = "0.1.0"
+license = "GPL-3.0-or-later"
 description = "Astralis — notes & productivity"
 edition = "2024"
 
