@@ -83,7 +83,7 @@ const folder = (name: string, parentId: string | null = null, vaultId?: string |
 const work = folder('Work')
 const projects = folder('Projects', work.id)
 folder('Personal')
-note('Welcome to Astralis', 'This is a **browser preview** with a mock backend.\n\nTry linking: [[Project Apollo]] and [[Ideas]].', ['astralis'], true)
+note('Welcome to Astralis', 'Your notes, as a universe. Everything you write stays on this computer.\n\n## Start here\n- **New note**: Ctrl+N, or the **New** button\n- **Link notes** with double brackets, like [[Project Apollo]] and [[Ideas]]\n- **Ask Astralis**: open the side panel and switch to **Chat**\n- **See your universe**: the graph turns your notes into galaxies\n\n## Try it\n- [x] Open Astralis\n- [ ] Write your first note\n- [ ] Link it to another one\n- [ ] Ask Astralis if your idea will pay off\n\n> **Tip:** Ctrl+K searches everything.', ['astralis', 'start'], true)
 note('Project Apollo', 'Goals for the launch. See [[Ideas]].\n\n- [ ] Draft plan\n- [ ] Review', ['work'], false, 'note', null, projects.id)
 note('Standup notes', 'Daily standup.', [], false, 'note', null, work.id)
 note('Ideas', 'A place for loose ideas.', ['personal'])

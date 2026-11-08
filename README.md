@@ -29,8 +29,8 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/galaxy.jpg" alt="A vault in Astralis's 3D graph: a spiral galaxy where linked notes form solar systems" width="100%">
-  <br><sub>A vault of 1,000 notes, seen as a galaxy. Every glow is a note; every cluster is a solar system of linked notes.</sub>
+  <img src="docs/images/app.png" alt="Astralis with the Welcome to Astralis note open: the note list, the editor and the side panel" width="100%">
+  <br><sub>Notes on the left, the editor in the middle, and the note's tags, links and tasks on the right.</sub>
 </p>
 
 ---
@@ -95,6 +95,11 @@ Every vault is a **3D galaxy** you can fly around. Notes that link to each other
 orbits, and notes reached through a planet are its moons. Unlinked notes are lone stars along
 the spiral arms. There's no picture behind them, so a big vault looks like a galaxy and a small
 one like a scatter of stars.
+
+<p align="center">
+  <img src="docs/images/galaxy.jpg" alt="A vault in Astralis's 3D graph: a spiral galaxy where linked notes form solar systems" width="100%">
+  <br><sub>A vault of 1,000 notes, seen as a galaxy. Every glow is a note; every cluster is a solar system of linked notes.</sub>
+</p>
 
 <table>
   <tr>

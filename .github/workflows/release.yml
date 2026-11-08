@@ -50,7 +50,7 @@ jobs:
           - os: windows-latest
             platform: windows_x64
             bundles: nsis
-          - os: macos-14
+          - os: macos-latest
             platform: macos_arm64
             bundles: app,dmg
     runs-on: ${{ matrix.os }}
@@ -136,7 +136,9 @@ jobs:
         shell: bash
         run: |
           cp target/release/bundle/nsis/*-setup.exe "dist/Astralis_${VERSION}_windows_x64_setup.exe"
-          EXE=$(ls target/release/astralis-desktop.exe target/release/Astralis.exe 2>/dev/null | head -n1)
+          for EXE in target/release/astralis-desktop.exe target/release/Astralis.exe; do
+            [ -f "$EXE" ] && break
+          done
           cp "$EXE" "dist/Astralis_${VERSION}_windows_x64_portable.exe"
 
       - name: Collect the macOS files
