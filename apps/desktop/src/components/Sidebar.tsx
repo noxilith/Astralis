@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { Archive, CalendarCheck, FileText, Network, Search, Settings, StickyNote } from 'lucide-react'
+import { Archive, CalendarCheck, FileText, Network, Search, Settings, StickyNote, Brain as BrainIcon } from 'lucide-react'
 import { PRODUCTIVITY_TABS, lastProductivityTab, type ProductivityTab } from '../views/Productivity'
 import { api } from '../api'
 import { useApp, type View } from '../context'
@@ -48,6 +48,7 @@ export function Sidebar() {
           dueToday,
         )}
         {icon('Graph', <Network size={17} />, view === 'graph', () => go('graph'))}
+        {icon('Brain — memory for your AI tools', <BrainIcon size={17} />, view === 'brain', () => go('brain'))}
         {icon('Templates', <FileText size={17} />, view === 'templates', () => go('templates'))}
         {icon('Archive', <Archive size={17} />, view === 'notes' && archive, () => {
           setListMode(archive ? { kind: 'tree' } : { kind: 'archive' })

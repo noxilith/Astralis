@@ -11,6 +11,7 @@ import { startCollab } from './lib/collab'
 import { NoteEditor } from './views/NoteEditor'
 import { Productivity } from './views/Productivity'
 import { GraphView } from './views/GraphView'
+import { BrainView } from './views/BrainView'
 import { TemplatesView } from './views/TemplatesView'
 import { SettingsView } from './views/SettingsView'
 import { MINUTE } from './lib/time'
@@ -101,6 +102,7 @@ function Shell() {
         {view === 'notes' && <NoteEditor theme={theme} />}
         {(view === 'tasks' || view === 'calendar' || view === 'planners') && <Productivity view={view} />}
         {view === 'graph' && <GraphView />}
+        {view === 'brain' && <BrainView />}
         {view === 'templates' && <TemplatesView />}
         {view === 'settings' && <SettingsView theme={theme} setTheme={setTheme} />}
         </div>

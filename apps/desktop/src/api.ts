@@ -143,6 +143,16 @@ export interface Vault {
   /** The drive it lives on ("google-drive"), if it's a cloud vault. */
   cloud: string | null
 }
+export type MemoryKind = 'decision' | 'preference' | 'gotcha' | 'howto' | 'fact' | 'context' | 'summary' | 'codemap'
+export interface Memory {
+  id: Id; short: string; folder: Id; project: string; kind: MemoryKind; hook: string; content: string
+  source: string; new: boolean; pinned: boolean; updatedAt: Ms; recalledAt: Ms | null; recallCount: number
+}
+export interface BrainProject { folder: Id; name: string; count: number; newCount: number }
+export interface BrainStats { recalls: number; tokensServed: number; tokensSaved: number }
+export interface TidyPair { a: Id; b: Id; aHook: string; bHook: string; score: number }
+export interface TidyReport { duplicates: TidyPair[]; similar: TidyPair[]; stale: Id[] }
+export interface BrainSetup { server: string; serverExists: boolean; args: string[]; mirror: string | null; vault: Id }
 export interface GoogleStatus { configured: boolean; builtin: boolean; clientId: string | null; email: string | null }
 export interface CloudInvite { email: string; acceptedBy: string | null }
 
@@ -267,6 +277,18 @@ export const api = {
   cloudJoin: () => call<string>('cloud_join'),
   cloudSyncNow: () => call<void>('cloud_sync_now'),
   openUrl: (url: string) => call<void>('open_url', { url }),
+
+  // The Brain (memory for AI agents)
+  brainProjects: () => call<BrainProject[]>('brain_projects'),
+  brainMemories: (folder: Id | null) => call<Memory[]>('brain_memories', { folder }),
+  brainSetReviewed: (id: Id, reviewed: boolean) => call<Memory>('brain_set_reviewed', { id, reviewed }),
+  brainForget: (id: Id) => call<void>('brain_forget', { id }),
+  brainTidy: (folder: Id | null) => call<TidyReport>('brain_tidy', { folder }),
+  brainMerge: (keep: Id, other: Id) => call<Memory>('brain_merge', { keep, other }),
+  brainCompact: (ids: Id[], hook: string) => call<Memory>('brain_compact', { ids, hook }),
+  brainStats: () => call<BrainStats>('brain_stats'),
+  brainSetup: () => call<BrainSetup>('brain_setup'),
+  brainSetMirror: (enabled: boolean, dir: string | null) => call<string | null>('brain_set_mirror', { enabled, dir }),
   moveNoteToVault: (noteId: Id, vaultId: Id) => call<Note>('move_note_to_vault', { noteId, vaultId }),
 
   // settings

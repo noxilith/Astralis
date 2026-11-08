@@ -25,6 +25,20 @@ const templates: Template[] = [
 const mockMe = { name: "noxilith", color: "#8b7bff" }
 const google: { clientId: string | null; email: string | null } = { clientId: null, email: null }
 const invites = new Map<string, { email: string; acceptedBy: string | null }[]>()
+const mem = (folder: string, project: string, kind: string, hook: string, source: string, isNew: boolean, recallCount = 0, daysAgo = 1) => ({
+  id: id(), short: Math.random().toString(16).slice(2, 8), folder, project, kind, hook, content: '', source, new: isNew, pinned: false,
+  updatedAt: now() - daysAgo * 86400000, recalledAt: recallCount ? now() - 3600000 : null, recallCount,
+})
+const brainMems = [
+  mem('me', 'Me', 'preference', 'Explain changes in plain words, no jargon', 'claude-code', false, 31),
+  mem('me', 'Me', 'preference', 'Uses fish shell; give bash blocks for commands', 'claude-code', false, 12),
+  mem('astralis', 'astralis', 'gotcha', 'Python is broken on this machine — script edits with node', 'claude-code', false, 9),
+  mem('astralis', 'astralis', 'gotcha', 'python3 fails (encodings missing); use node instead', 'codex', true, 0),
+  mem('astralis', 'astralis', 'decision', 'Sync is per vault; peers can never write outside shared vaults', 'claude-code', false, 7),
+  mem('astralis', 'astralis', 'howto', 'Run the app with ./run.sh app; second window: ./run.sh second', 'claude-code', true, 4),
+  mem('astralis', 'astralis', 'context', 'Old WebGL graph experiment (abandoned)', 'codex', false, 0, 80),
+  mem('astralis', 'astralis', 'decision', 'Note text merges as a yrs CRDT; the editor binds to Yjs', 'claude-code', true, 2),
+]
 const docs = new Map<string, Y.Doc>()
 const docFor = (noteId: string) => {
   const n = notes.find((x) => x.id === noteId)!
@@ -245,6 +259,24 @@ const handlers: Record<string, (a: Args) => unknown> = {
   cloud_uninvite: ({ vaultId, email }) => void invites.set(vaultId, (invites.get(vaultId) ?? []).filter((i: { email: string }) => i.email !== email)),
   cloud_join: () => 'Shared vault',
   cloud_sync_now: () => undefined,
+  // The Brain (pretend).
+  brain_projects: () => [
+    { folder: 'me', name: 'Me', count: 2, newCount: 0 },
+    { folder: 'astralis', name: 'astralis', count: brainMems.length - 2, newCount: brainMems.filter((x) => x.new && x.folder === 'astralis').length },
+  ],
+  brain_memories: ({ folder }) => brainMems.filter((x) => !folder || x.folder === folder),
+  brain_set_reviewed: ({ id: k, reviewed }) => Object.assign(find(brainMems, k), { new: !reviewed }),
+  brain_forget: ({ id: k }) => void brainMems.splice(brainMems.indexOf(find(brainMems, k)), 1),
+  brain_tidy: () => ({
+    duplicates: [{ a: brainMems[2].id, b: brainMems[3].id, aHook: brainMems[2].hook, bHook: brainMems[3].hook, score: 0.91 }],
+    similar: [],
+    stale: [brainMems[6].id],
+  }),
+  brain_merge: ({ keep }) => find(brainMems, keep),
+  brain_compact: ({ ids }) => find(brainMems, ids[0]),
+  brain_stats: () => ({ recalls: 148, tokensServed: 23100, tokensSaved: 412800 }),
+  brain_setup: () => ({ server: '/home/you/Projects/Astralis/target/debug/astralis-mcp', serverExists: true, args: [], mirror: '/home/you/Astralis Brain', vault: 'brain' }),
+  brain_set_mirror: ({ enabled }) => (enabled ? '/home/you/Astralis Brain' : null),
   open_url: ({ url }) => void window.open(url, '_blank'),
   vault_share: ({ vaultId, peer }) => { const v = find(vaults, vaultId); v.sharedWith = [...new Set([...v.sharedWith, peer])]; return v },
   vault_unshare: ({ vaultId, peer }) => { const v = find(vaults, vaultId); v.sharedWith = v.sharedWith.filter((p: string) => p !== peer); return v },

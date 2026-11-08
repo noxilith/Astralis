@@ -1,0 +1,926 @@
+//! The Brain: a memory bank for AI coding agents (Claude Code, Codex, Cursor…).
+//!
+//! The goal is fewer tokens: an agent asks the Brain for exactly what it needs instead of
+//! re-reading chats and files. So everything here is about returning the smallest useful text:
+//! - a tiny **index** (one line per memory) to start a session with,
+//! - **recall** by meaning that returns only the best few memories, trimmed to the matching lines,
+//! - a **code map** (file → purpose) that says which files changed since they were described,
+//! - **tidy** reports (duplicates, stale, maybe-conflicting) to keep the Brain small.
+//!
+//! Memories are ordinary notes in a "Brain" vault: one folder per project plus "Me" for things
+//! that apply everywhere. A small front-matter header holds the memory's type, its one-line
+//! hook, who wrote it and whether you've reviewed it — readable and editable like any note, and
+//! mirrored to Markdown files (see [`Store::export_brain`]).
+
+use std::collections::{BTreeMap, HashSet};
+use std::path::Path;
+
+use rusqlite::params;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::ai::embed::{LexicalEmbedder, dot};
+use crate::ai::text::{content_words, sentences, stem};
+use crate::error::{Error, Result};
+use crate::notes::{ArchiveFilter, ListFilter, NewNote, Note, NotePatch};
+use crate::store::Store;
+use crate::util::now_ms;
+
+pub const BRAIN_VAULT_NAME: &str = "Brain";
+pub const ME_FOLDER: &str = "Me";
+const VAULT_KEY: &str = "brain.vault";
+const PROJECTS_KEY: &str = "brain.projects";
+const STATS_KEY: &str = "brain.stats";
+const MIRROR_KEY: &str = "brain.mirror";
+const CODE_MAP_TITLE: &str = "Code map";
+/// Index lines shown before "+N more".
+const INDEX_LIMIT: usize = 60;
+
+pub(crate) const BRAIN_MIGRATION: &str = "
+    CREATE TABLE brain_recalls (
+        note_id BLOB PRIMARY KEY, last_at INTEGER NOT NULL, count INTEGER NOT NULL
+    ) WITHOUT ROWID;
+";
+
+/// What a memory is about. Agents pick one; the index groups by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryKind {
+    /// How things are decided / constraints ("we use X because Y").
+    Decision,
+    /// How the user likes things done.
+    Preference,
+    /// Something surprising that wastes time if forgotten.
+    Gotcha,
+    /// How to do a recurring task (commands, steps).
+    Howto,
+    /// A fact about the project or its world.
+    Fact,
+    /// Work in progress / what's next.
+    Context,
+    /// A compressed summary of older memories.
+    Summary,
+    /// The project's file map (one per project).
+    Codemap,
+}
+
+impl MemoryKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MemoryKind::Decision => "decision",
+            MemoryKind::Preference => "preference",
+            MemoryKind::Gotcha => "gotcha",
+            MemoryKind::Howto => "howto",
+            MemoryKind::Fact => "fact",
+            MemoryKind::Context => "context",
+            MemoryKind::Summary => "summary",
+            MemoryKind::Codemap => "codemap",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "decision" | "decisions" => MemoryKind::Decision,
+            "preference" | "preferences" | "pref" => MemoryKind::Preference,
+            "gotcha" | "gotchas" | "pitfall" => MemoryKind::Gotcha,
+            "howto" | "how-to" | "how to" | "procedure" => MemoryKind::Howto,
+            "fact" | "facts" | "note" | "reference" => MemoryKind::Fact,
+            "context" | "wip" | "status" | "todo" => MemoryKind::Context,
+            "summary" => MemoryKind::Summary,
+            "codemap" | "code map" | "map" => MemoryKind::Codemap,
+            _ => return None,
+        })
+    }
+    fn heading(self) -> &'static str {
+        match self {
+            MemoryKind::Decision => "Decisions",
+            MemoryKind::Preference => "Preferences",
+            MemoryKind::Gotcha => "Gotchas",
+            MemoryKind::Howto => "How-tos",
+            MemoryKind::Fact => "Facts",
+            MemoryKind::Context => "Current work",
+            MemoryKind::Summary => "Summaries",
+            MemoryKind::Codemap => "Code map",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Memory {
+    pub id: Uuid,
+    /// Short handle agents use ("a1b2c3").
+    pub short: String,
+    /// The project folder it lives in.
+    pub folder: Uuid,
+    pub project: String,
+    pub kind: MemoryKind,
+    /// One line: what this memory says (shown in the index).
+    pub hook: String,
+    /// The details (without the header).
+    pub content: String,
+    /// Who wrote it ("claude-code", "codex", "you"…).
+    pub source: String,
+    /// Not yet reviewed by you.
+    pub new: bool,
+    pub pinned: bool,
+    pub updated_at: i64,
+    pub recalled_at: Option<i64>,
+    pub recall_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainProject {
+    pub folder: Uuid,
+    pub name: String,
+    pub count: usize,
+    pub new_count: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainStats {
+    pub recalls: u64,
+    /// Estimated tokens the Brain returned to agents.
+    pub tokens_served: u64,
+    /// Estimated tokens avoided vs. loading every memory each time.
+    pub tokens_saved: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TidyPair {
+    pub a: Uuid,
+    pub b: Uuid,
+    pub a_hook: String,
+    pub b_hook: String,
+    pub score: f32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TidyReport {
+    /// Nearly the same: merge them.
+    pub duplicates: Vec<TidyPair>,
+    /// Same subject, different words: check they still agree.
+    pub similar: Vec<TidyPair>,
+    /// Not touched or recalled in a long time: archive or compress.
+    pub stale: Vec<Uuid>,
+}
+
+/// One code map line: a file and what it's for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapEntry {
+    pub path: String,
+    pub purpose: String,
+    /// The file's modification time (seconds) when it was described.
+    pub mtime: Option<u64>,
+}
+
+// ---- header (front matter) -------------------------------------------------------------
+
+struct Header {
+    kind: Option<MemoryKind>,
+    hook: Option<String>,
+    source: Option<String>,
+    status: Option<String>,
+}
+
+fn split_header(body: &str) -> (Header, &str) {
+    let mut h = Header { kind: None, hook: None, source: None, status: None };
+    let Some(rest) = body.strip_prefix("---\n") else { return (h, body) };
+    let Some(end) = rest.find("\n---") else { return (h, body) };
+    for line in rest[..end].lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            let v = v.trim().trim_matches('"').to_string();
+            match k.trim() {
+                "type" => h.kind = MemoryKind::parse(&v),
+                "hook" => h.hook = Some(v),
+                "source" => h.source = Some(v),
+                "status" => h.status = Some(v),
+                _ => {}
+            }
+        }
+    }
+    let after = &rest[end + 4..];
+    (h, after.strip_prefix('\n').unwrap_or(after).trim_start_matches('\n'))
+}
+
+fn one_line(s: &str, max: usize) -> String {
+    let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if s.chars().count() <= max {
+        return s;
+    }
+    let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", cut.trim_end())
+}
+
+fn render(kind: MemoryKind, hook: &str, source: &str, new: bool, content: &str) -> String {
+    format!(
+        "---\ntype: {}\nhook: {}\nsource: {}\nstatus: {}\n---\n{}",
+        kind.as_str(),
+        one_line(hook, 200),
+        one_line(source, 40),
+        if new { "new" } else { "reviewed" },
+        content.trim()
+    )
+}
+
+fn short_of(id: Uuid) -> String {
+    let s = id.simple().to_string();
+    s[s.len() - 6..].to_string()
+}
+
+/// Rough token count (≈ 4 characters per token).
+pub fn estimate_tokens(s: &str) -> u64 {
+    (s.len() as u64).div_ceil(4)
+}
+
+// ---- ranking ----------------------------------------------------------------------------
+
+struct Ranker {
+    e: LexicalEmbedder,
+}
+
+impl Ranker {
+    fn new() -> Self {
+        Self { e: LexicalEmbedder::default() }
+    }
+    fn vec(&self, s: &str) -> Vec<f32> {
+        self.e.embed_one(s)
+    }
+}
+
+fn stems(s: &str) -> HashSet<String> {
+    content_words(s).iter().map(|w| stem(w)).collect()
+}
+
+impl Store {
+    // ---- the Brain vault and its projects ----
+
+    /// The Brain vault (created plain on first use).
+    pub fn brain_vault(&mut self) -> Result<Uuid> {
+        if let Some(id) = self.get_setting(VAULT_KEY)?.and_then(|s| s.parse::<Uuid>().ok())
+            && self.get_vault(id).is_ok()
+        {
+            return Ok(id);
+        }
+        let existing = self.list_vaults()?.into_iter().find(|v| v.name == BRAIN_VAULT_NAME && !v.encrypted && v.owner.is_none());
+        let id = match existing {
+            Some(v) => v.id,
+            None => self.create_vault(BRAIN_VAULT_NAME, None)?.id,
+        };
+        self.set_setting(VAULT_KEY, &id.to_string())?;
+        Ok(id)
+    }
+
+    fn folder_named(&self, vault: Uuid, name: &str) -> Result<Option<Uuid>> {
+        Ok(self.list_folders(Some(vault))?.into_iter().find(|f| f.parent_id.is_none() && f.name == name).map(|f| f.id))
+    }
+
+    /// The "Me" folder: preferences that apply to every project.
+    pub fn brain_me(&mut self) -> Result<Uuid> {
+        let vault = self.brain_vault()?;
+        match self.folder_named(vault, ME_FOLDER)? {
+            Some(f) => Ok(f),
+            None => Ok(self.create_folder(Some(vault), None, ME_FOLDER)?.id),
+        }
+    }
+
+    /// The folder for a project, found by a stable key (a git remote, or the repo's path);
+    /// created on first use with a readable name.
+    pub fn brain_project(&mut self, key: &str, name: &str) -> Result<Uuid> {
+        let vault = self.brain_vault()?;
+        let mut map: BTreeMap<String, String> =
+            self.get_setting(PROJECTS_KEY)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
+        if let Some(id) = map.get(key).and_then(|s| s.parse::<Uuid>().ok())
+            && self.list_folders(Some(vault))?.iter().any(|f| f.id == id)
+        {
+            return Ok(id);
+        }
+        let name = one_line(name, 60);
+        let name = if name.is_empty() || name == ME_FOLDER { "Project".to_string() } else { name };
+        let folder = match self.folder_named(vault, &name)? {
+            // A folder with that name but no recorded key (made by hand): adopt it.
+            Some(f) if !map.values().any(|v| v == &f.to_string()) => f,
+            Some(_) => self.create_folder(Some(vault), None, &format!("{name} ({})", &short_of(Uuid::now_v7())[..4]))?.id,
+            None => self.create_folder(Some(vault), None, &name)?.id,
+        };
+        map.insert(key.to_string(), folder.to_string());
+        self.set_setting(PROJECTS_KEY, &serde_json::to_string(&map)?)?;
+        Ok(folder)
+    }
+
+    pub fn brain_projects(&mut self) -> Result<Vec<BrainProject>> {
+        let vault = self.brain_vault()?;
+        let all = self.brain_memories_in(vault, None)?;
+        let mut out: Vec<BrainProject> = self
+            .list_folders(Some(vault))?
+            .into_iter()
+            .filter(|f| f.parent_id.is_none())
+            .map(|f| {
+                let mine: Vec<&Memory> = all.iter().filter(|m| m.folder == f.id).collect();
+                BrainProject { folder: f.id, name: f.name, count: mine.len(), new_count: mine.iter().filter(|m| m.new).count() }
+            })
+            .collect();
+        out.sort_by(|a, b| (a.name != ME_FOLDER).cmp(&(b.name != ME_FOLDER)).then(a.name.cmp(&b.name)));
+        Ok(out)
+    }
+
+    // ---- memories ----
+
+    fn to_memory(&self, n: Note, folder_name: &str, recalls: &BTreeMap<Uuid, (i64, i64)>) -> Option<Memory> {
+        let folder = n.folder_id?;
+        let (h, content) = split_header(&n.body);
+        let kind = h.kind.unwrap_or(if n.title == CODE_MAP_TITLE { MemoryKind::Codemap } else { MemoryKind::Fact });
+        let hook = h.hook.filter(|s| !s.is_empty()).unwrap_or_else(|| one_line(&n.title, 200));
+        let (recalled_at, recall_count) = recalls.get(&n.id).map(|(a, c)| (Some(*a), *c)).unwrap_or((None, 0));
+        Some(Memory {
+            id: n.id,
+            short: short_of(n.id),
+            folder,
+            project: folder_name.to_string(),
+            kind,
+            hook,
+            content: content.to_string(),
+            source: h.source.unwrap_or_else(|| "you".into()),
+            new: h.status.as_deref() == Some("new"),
+            pinned: n.pinned,
+            updated_at: n.updated_at,
+            recalled_at,
+            recall_count,
+        })
+    }
+
+    fn recall_stats(&self) -> Result<BTreeMap<Uuid, (i64, i64)>> {
+        let mut stmt = self.conn.prepare("SELECT note_id, last_at, count FROM brain_recalls")?;
+        let rows = stmt.query_map([], |r| Ok((crate::util::uuid_col(r, 0)?, r.get(1)?, r.get(2)?)))?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (id, a, c) = row?;
+            out.insert(id, (a, c));
+        }
+        Ok(out)
+    }
+
+    fn brain_memories_in(&self, vault: Uuid, folders: Option<&[Uuid]>) -> Result<Vec<Memory>> {
+        let names: BTreeMap<Uuid, String> = self.list_folders(Some(vault))?.into_iter().map(|f| (f.id, f.name)).collect();
+        let recalls = self.recall_stats()?;
+        let notes = self.list_notes(&ListFilter { vault_id: Some(vault), archive: ArchiveFilter::Active, ..Default::default() })?;
+        Ok(notes
+            .into_iter()
+            .filter(|n| n.folder_id.is_some_and(|f| folders.is_none_or(|fs| fs.contains(&f))))
+            .filter_map(|n| {
+                let name = names.get(&n.folder_id?)?.clone();
+                self.to_memory(n, &name, &recalls)
+            })
+            .collect())
+    }
+
+    /// Memories in a project folder (or every project with `None`), newest first.
+    pub fn brain_memories(&mut self, folder: Option<Uuid>) -> Result<Vec<Memory>> {
+        let vault = self.brain_vault()?;
+        let mut m = self.brain_memories_in(vault, folder.as_ref().map(std::slice::from_ref))?;
+        m.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.updated_at.cmp(&a.updated_at)));
+        Ok(m)
+    }
+
+    /// Finds a memory by its short handle or full id.
+    pub fn brain_memory(&mut self, handle: &str) -> Result<Memory> {
+        let handle = handle.trim().trim_matches(['[', ']']).to_ascii_lowercase();
+        let all = self.brain_memories(None)?;
+        if let Ok(id) = handle.parse::<Uuid>() {
+            return all.into_iter().find(|m| m.id == id).ok_or(Error::NotFound("memory", id));
+        }
+        let mut hits = all.into_iter().filter(|m| !handle.is_empty() && m.short.ends_with(&handle));
+        match (hits.next(), hits.next()) {
+            (Some(m), None) => Ok(m),
+            (Some(_), Some(_)) => Err(Error::invalid(format!("“{handle}” matches several memories; use more characters"))),
+            _ => Err(Error::invalid(format!("no memory “{handle}”"))),
+        }
+    }
+
+    /// Saves a memory. If one in the same project already says (nearly) the same thing, that one
+    /// is updated instead. Returns the memory and whether it was merged into an existing one.
+    pub fn remember(&mut self, folder: Uuid, kind: MemoryKind, hook: &str, content: &str, source: &str) -> Result<(Memory, bool)> {
+        let hook = one_line(hook, 200);
+        if hook.is_empty() {
+            return Err(Error::invalid("a memory needs a one-line hook"));
+        }
+        let vault = self.brain_vault()?;
+        let r = Ranker::new();
+        let incoming = r.vec(&format!("{hook}\n{content}"));
+        let incoming_hook = r.vec(&hook);
+        let existing = self.brain_memories_in(vault, Some(&[folder]))?;
+        // The same point (nearly identical hook), or the same thing said overall.
+        let twin = existing
+            .iter()
+            .filter(|m| m.kind != MemoryKind::Codemap && kind != MemoryKind::Codemap)
+            .map(|m| {
+                let whole = dot(&incoming, &r.vec(&format!("{}\n{}", m.hook, m.content)));
+                let hooks = dot(&incoming_hook, &r.vec(&m.hook));
+                (m, if hooks >= 0.92 { hooks } else { whole })
+            })
+            .filter(|(_, s)| *s >= 0.86)
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((m, _)) = twin {
+            let merged = merge_text(&m.content, content);
+            let id = m.id;
+            self.update_note(id, NotePatch { title: Some(hook.clone()), body: Some(render(kind, &hook, source, true, &merged)) })?;
+            return Ok((self.brain_memory(&id.to_string())?, true));
+        }
+        let note = self.create_note(NewNote {
+            title: hook.clone(),
+            body: render(kind, &hook, source, source != "you", content),
+            vault_id: Some(vault),
+            folder_id: Some(folder),
+            ..Default::default()
+        })?;
+        Ok((self.brain_memory(&note.id.to_string())?, false))
+    }
+
+    /// Changes a memory's hook, content or type (keeps the rest).
+    pub fn update_memory(&mut self, handle: &str, hook: Option<&str>, content: Option<&str>, kind: Option<MemoryKind>, source: &str) -> Result<Memory> {
+        let m = self.brain_memory(handle)?;
+        let hook = hook.map(|h| one_line(h, 200)).filter(|h| !h.is_empty()).unwrap_or(m.hook.clone());
+        let kind = kind.unwrap_or(m.kind);
+        let content = content.unwrap_or(&m.content);
+        let new = source != "you" || m.new;
+        self.update_note(m.id, NotePatch { title: Some(hook.clone()), body: Some(render(kind, &hook, &m.source, new, content)) })?;
+        self.brain_memory(&m.id.to_string())
+    }
+
+    /// Marks a memory as reviewed (or new again).
+    pub fn set_memory_reviewed(&mut self, handle: &str, reviewed: bool) -> Result<Memory> {
+        let m = self.brain_memory(handle)?;
+        self.update_note(m.id, NotePatch { body: Some(render(m.kind, &m.hook, &m.source, !reviewed, &m.content)), ..Default::default() })?;
+        self.brain_memory(&m.id.to_string())
+    }
+
+    /// Forgets a memory (archived, so it can be restored from the archive).
+    pub fn forget(&mut self, handle: &str) -> Result<Memory> {
+        let m = self.brain_memory(handle)?;
+        self.archive_note(m.id)?;
+        Ok(m)
+    }
+
+    fn note_recalls(&self, ids: &[Uuid]) -> Result<()> {
+        let now = now_ms();
+        for id in ids {
+            self.conn.execute(
+                "INSERT INTO brain_recalls(note_id, last_at, count) VALUES (?1, ?2, 1)
+                 ON CONFLICT(note_id) DO UPDATE SET last_at = excluded.last_at, count = count + 1",
+                params![id.as_bytes(), now],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn brain_stats(&self) -> Result<BrainStats> {
+        Ok(self.get_setting(STATS_KEY)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default())
+    }
+
+    fn count_served(&self, served: &str, whole: u64) -> Result<()> {
+        let mut s = self.brain_stats()?;
+        let t = estimate_tokens(served);
+        s.recalls += 1;
+        s.tokens_served += t;
+        s.tokens_saved += whole.saturating_sub(t);
+        self.set_setting(STATS_KEY, &serde_json::to_string(&s)?)
+    }
+
+    // ---- what agents read ----
+
+    /// The session-start index: one line per memory (project + Me), grouped by type, with
+    /// handles for details. Small on purpose.
+    pub fn brain_context(&mut self, folder: Uuid, root: Option<&Path>) -> Result<String> {
+        let me = self.brain_me()?;
+        let vault = self.brain_vault()?;
+        let project_name = self.list_folders(Some(vault))?.into_iter().find(|f| f.id == folder).map(|f| f.name).unwrap_or_default();
+        let mut mine = self.brain_memories_in(vault, Some(&[folder]))?;
+        let everywhere = if folder == me { vec![] } else { self.brain_memories_in(vault, Some(&[me]))? };
+        let map = mine.iter().find(|m| m.kind == MemoryKind::Codemap).cloned();
+        mine.retain(|m| m.kind != MemoryKind::Codemap);
+        // Most useful first: pinned, often recalled, recent.
+        mine.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.recall_count.cmp(&a.recall_count)).then(b.updated_at.cmp(&a.updated_at)));
+        let shown: Vec<&Memory> = mine.iter().take(INDEX_LIMIT).collect();
+        let mut out = format!(
+            "Brain · {project_name}: {} memories. Handles in [brackets] — brain_read for details, brain_recall to search.\n",
+            mine.len()
+        );
+        if mine.is_empty() {
+            out.push_str("Nothing remembered yet for this project. Save what you learn with brain_remember.\n");
+        }
+        let mut groups: BTreeMap<MemoryKind, Vec<&Memory>> = BTreeMap::new();
+        for m in &shown {
+            groups.entry(m.kind).or_default().push(m);
+        }
+        for (kind, list) in groups {
+            out.push_str(&format!("{}:\n", kind.heading()));
+            for m in list {
+                out.push_str(&format!("- [{}] {}{}\n", m.short, if m.pinned { "★ " } else { "" }, m.hook));
+            }
+        }
+        if mine.len() > shown.len() {
+            out.push_str(&format!("(+{} more — brain_recall finds them)\n", mine.len() - shown.len()));
+        }
+        if !everywhere.is_empty() {
+            out.push_str("Me (applies everywhere):\n");
+            for m in everywhere.iter().take(25) {
+                out.push_str(&format!("- [{}] {}\n", m.short, m.hook));
+            }
+        }
+        if let Some(map) = map {
+            let entries = parse_map(&map.content);
+            let changed = root.map(|r| entries.iter().filter(|e| map_status(r, e).is_some()).count()).unwrap_or(0);
+            out.push_str(&format!(
+                "Code map: {} files described{} — brain_map to look up where things are.\n",
+                entries.len(),
+                if changed > 0 { format!(", {changed} changed or gone since") } else { String::new() }
+            ));
+        } else {
+            out.push_str("No code map yet — as you learn what files do, save them with brain_map_note.\n");
+        }
+        let whole: u64 = mine.iter().chain(everywhere.iter()).map(|m| estimate_tokens(&m.content) + estimate_tokens(&m.hook)).sum();
+        self.count_served(&out, whole)?;
+        Ok(out)
+    }
+
+    /// Memories matching a question, by meaning: the best few, each trimmed to its most relevant
+    /// lines. Searches the project and Me.
+    pub fn brain_recall(&mut self, folder: Uuid, query: &str, limit: usize) -> Result<(String, Vec<Memory>)> {
+        let me = self.brain_me()?;
+        let vault = self.brain_vault()?;
+        let pool: Vec<Memory> = self
+            .brain_memories_in(vault, Some(&[folder, me]))?
+            .into_iter()
+            .filter(|m| m.kind != MemoryKind::Codemap)
+            .collect();
+        let r = Ranker::new();
+        let q = r.vec(query);
+        let qterms = stems(query);
+        let mut scored: Vec<(f32, &Memory)> = pool
+            .iter()
+            .map(|m| {
+                let body = dot(&q, &r.vec(&format!("{}\n{}", m.hook, m.content)));
+                let hook = dot(&q, &r.vec(&m.hook));
+                let words = stems(&format!("{} {}", m.hook, m.content));
+                let overlap = if qterms.is_empty() { 0.0 } else { qterms.iter().filter(|t| words.contains(*t)).count() as f32 / qterms.len() as f32 };
+                (0.55 * body + 0.25 * hook + 0.2 * overlap + if m.pinned { 0.03 } else { 0.0 }, m)
+            })
+            .filter(|(s, _)| *s >= 0.1)
+            .collect();
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        scored.truncate(limit.clamp(1, 12));
+        let mut out = String::new();
+        if scored.is_empty() {
+            out.push_str(&format!("No memories about “{}”. (If you work it out, brain_remember it.)\n", one_line(query, 80)));
+        }
+        for (_, m) in &scored {
+            out.push_str(&format!("[{}] {} · {}{}\n", m.short, m.kind.as_str(), m.hook, if m.folder == me { " (Me)" } else { "" }));
+            for line in best_lines(&r, &q, &qterms, &m.content, 3) {
+                out.push_str(&format!("  {line}\n"));
+            }
+        }
+        let found: Vec<Memory> = scored.iter().map(|(_, m)| (*m).clone()).collect();
+        self.note_recalls(&found.iter().map(|m| m.id).collect::<Vec<_>>())?;
+        let whole: u64 = pool.iter().map(|m| estimate_tokens(&m.content) + estimate_tokens(&m.hook)).sum();
+        self.count_served(&out, whole)?;
+        Ok((out, found))
+    }
+
+    /// A memory in full.
+    pub fn brain_read(&mut self, handle: &str) -> Result<String> {
+        let m = self.brain_memory(handle)?;
+        self.note_recalls(&[m.id])?;
+        let out = format!("[{}] {} · {}\n{}\n", m.short, m.kind.as_str(), m.hook, m.content.trim());
+        self.count_served(&out, estimate_tokens(&out))?;
+        Ok(out)
+    }
+
+    // ---- code map ----
+
+    fn code_map(&mut self, folder: Uuid) -> Result<Option<Memory>> {
+        let vault = self.brain_vault()?;
+        Ok(self.brain_memories_in(vault, Some(&[folder]))?.into_iter().find(|m| m.kind == MemoryKind::Codemap))
+    }
+
+    pub fn brain_map_entries(&mut self, folder: Uuid) -> Result<Vec<MapEntry>> {
+        Ok(self.code_map(folder)?.map(|m| parse_map(&m.content)).unwrap_or_default())
+    }
+
+    /// Adds or updates code map lines (a blank purpose removes the file).
+    pub fn brain_map_note(&mut self, folder: Uuid, entries: &[MapEntry], source: &str) -> Result<usize> {
+        let mut map = self.brain_map_entries(folder)?;
+        for e in entries {
+            let path = e.path.trim().trim_start_matches("./").to_string();
+            if path.is_empty() {
+                continue;
+            }
+            map.retain(|x| x.path != path);
+            if !e.purpose.trim().is_empty() {
+                map.push(MapEntry { path, purpose: one_line(&e.purpose, 160), mtime: e.mtime });
+            }
+        }
+        map.sort_by(|a, b| a.path.cmp(&b.path));
+        let content = render_map(&map);
+        let hook = format!("Code map: {} files", map.len());
+        let body = render(MemoryKind::Codemap, &hook, source, false, &content);
+        match self.code_map(folder)? {
+            Some(m) => {
+                self.update_note(m.id, NotePatch { title: Some(CODE_MAP_TITLE.into()), body: Some(body) })?;
+            }
+            None => {
+                let vault = self.brain_vault()?;
+                self.create_note(NewNote { title: CODE_MAP_TITLE.into(), body, vault_id: Some(vault), folder_id: Some(folder), ..Default::default() })?;
+            }
+        }
+        Ok(map.len())
+    }
+
+    /// Code map lines relevant to `query` (or all of them, compactly), flagging files that changed
+    /// or vanished since they were described.
+    pub fn brain_map(&mut self, folder: Uuid, query: Option<&str>, root: Option<&Path>, limit: usize) -> Result<String> {
+        let map = self.brain_map_entries(folder)?;
+        if map.is_empty() {
+            return Ok("No code map yet for this project. As you learn what files do, save them with brain_map_note.\n".into());
+        }
+        let mut entries: Vec<&MapEntry> = map.iter().collect();
+        if let Some(q) = query.filter(|q| !q.trim().is_empty()) {
+            let r = Ranker::new();
+            let qv = r.vec(q);
+            let qterms = stems(q);
+            let mut scored: Vec<(f32, &MapEntry)> = entries
+                .iter()
+                .map(|e| {
+                    let text = format!("{} {}", e.path.replace(['/', '_', '-', '.'], " "), e.purpose);
+                    let words = stems(&text);
+                    let overlap = if qterms.is_empty() { 0.0 } else { qterms.iter().filter(|t| words.contains(*t)).count() as f32 / qterms.len() as f32 };
+                    (0.6 * dot(&qv, &r.vec(&text)) + 0.4 * overlap, *e)
+                })
+                .filter(|(s, _)| *s > 0.08)
+                .collect();
+            scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+            entries = scored.into_iter().take(limit.max(1)).map(|(_, e)| e).collect();
+            if entries.is_empty() {
+                return Ok(format!("Nothing in the code map matches “{}”.\n", one_line(q, 60)));
+            }
+        }
+        let mut out = String::new();
+        for e in &entries {
+            let flag = root.and_then(|r| map_status(r, e)).map(|s| format!(" ({s})")).unwrap_or_default();
+            out.push_str(&format!("{} — {}{}\n", e.path, e.purpose, flag));
+        }
+        let whole: u64 = map.iter().map(|e| estimate_tokens(&e.path) + estimate_tokens(&e.purpose) + 2).sum();
+        self.count_served(&out, whole)?;
+        Ok(out)
+    }
+
+    // ---- keeping it small ----
+
+    /// Duplicates, maybe-conflicting pairs and stale memories in a project (or everywhere).
+    pub fn brain_tidy(&mut self, folder: Option<Uuid>) -> Result<TidyReport> {
+        let all: Vec<Memory> = self.brain_memories(folder)?.into_iter().filter(|m| m.kind != MemoryKind::Codemap).collect();
+        let r = Ranker::new();
+        let vecs: Vec<Vec<f32>> = all.iter().map(|m| r.vec(&format!("{}\n{}", m.hook, m.content))).collect();
+        let mut report = TidyReport::default();
+        for i in 0..all.len() {
+            for j in i + 1..all.len() {
+                if all[i].folder != all[j].folder {
+                    continue;
+                }
+                let s = dot(&vecs[i], &vecs[j]);
+                let pair = || TidyPair { a: all[i].id, b: all[j].id, a_hook: all[i].hook.clone(), b_hook: all[j].hook.clone(), score: s };
+                if s >= 0.8 {
+                    report.duplicates.push(pair());
+                } else if s >= 0.55 && all[i].kind == all[j].kind && matches!(all[i].kind, MemoryKind::Decision | MemoryKind::Preference | MemoryKind::Fact) {
+                    report.similar.push(pair());
+                }
+            }
+        }
+        let now = now_ms();
+        let day = 86_400_000;
+        report.stale = all
+            .iter()
+            .filter(|m| !m.pinned && m.kind != MemoryKind::Summary && now - m.updated_at > 30 * day && m.recalled_at.is_none_or(|t| now - t > 45 * day))
+            .map(|m| m.id)
+            .collect();
+        report.duplicates.sort_by(|a, b| b.score.total_cmp(&a.score));
+        report.similar.sort_by(|a, b| b.score.total_cmp(&a.score));
+        Ok(report)
+    }
+
+    /// Folds `other` into `keep` (its new lines appended) and archives `other`.
+    pub fn brain_merge(&mut self, keep: &str, other: &str) -> Result<Memory> {
+        let a = self.brain_memory(keep)?;
+        let b = self.brain_memory(other)?;
+        if a.id == b.id {
+            return Ok(a);
+        }
+        let merged = merge_text(&a.content, &format!("{}\n{}", b.hook, b.content));
+        self.update_note(a.id, NotePatch { body: Some(render(a.kind, &a.hook, &a.source, a.new, &merged)), ..Default::default() })?;
+        self.archive_note(b.id)?;
+        self.brain_memory(&a.id.to_string())
+    }
+
+    /// Compresses several memories into one summary (each becomes a line) and archives them.
+    pub fn brain_compact(&mut self, handles: &[String], hook: &str) -> Result<Memory> {
+        let ms: Vec<Memory> = handles.iter().map(|h| self.brain_memory(h)).collect::<Result<_>>()?;
+        let Some(first) = ms.first() else { return Err(Error::invalid("pick memories to compress")) };
+        let folder = first.folder;
+        let mut content = String::new();
+        for m in &ms {
+            let first_line = sentences(&m.content).into_iter().next().map(|s| format!(": {}", one_line(&s, 160))).unwrap_or_default();
+            content.push_str(&format!("- {}{}\n", m.hook, first_line));
+        }
+        let hook = if hook.trim().is_empty() { format!("Summary of {} older memories", ms.len()) } else { hook.to_string() };
+        let vault = self.brain_vault()?;
+        let note = self.create_note(NewNote {
+            title: one_line(&hook, 200),
+            body: render(MemoryKind::Summary, &hook, "you", false, &content),
+            vault_id: Some(vault),
+            folder_id: Some(folder),
+            ..Default::default()
+        })?;
+        for m in &ms {
+            self.archive_note(m.id)?;
+        }
+        self.brain_memory(&note.id.to_string())
+    }
+
+    /// Changes whenever a Brain note does (count, latest update) — cheap, for watching.
+    pub fn brain_change_stamp(&self) -> Result<(i64, i64)> {
+        let Some(vault) = self.get_setting(VAULT_KEY)?.and_then(|s| s.parse::<Uuid>().ok()) else { return Ok((0, 0)) };
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(MAX(updated_at), 0) + COALESCE(SUM(archived_at IS NOT NULL), 0) FROM notes WHERE vault_id = ?1",
+            [vault.as_bytes()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
+
+    // ---- Markdown mirror ----
+
+    /// Where the Brain is mirrored as Markdown (default `~/Astralis Brain`), or `None` if off.
+    pub fn brain_mirror_dir(&self) -> Result<Option<std::path::PathBuf>> {
+        match self.get_setting(MIRROR_KEY)?.as_deref() {
+            Some("off") => Ok(None),
+            Some(p) if !p.trim().is_empty() => Ok(Some(std::path::PathBuf::from(p))),
+            _ => Ok(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(|h| std::path::PathBuf::from(h).join("Astralis Brain"))),
+        }
+    }
+
+    /// Sets the mirror folder (`None` turns the mirror off).
+    pub fn set_brain_mirror_dir(&self, dir: Option<&str>) -> Result<()> {
+        self.set_setting(MIRROR_KEY, dir.unwrap_or("off"))
+    }
+
+    /// Re-exports the mirror if it's on (after changes).
+    pub fn sync_brain_mirror(&mut self) -> Result<()> {
+        if let Some(d) = self.brain_mirror_dir()? {
+            self.export_brain(&d)?;
+        }
+        Ok(())
+    }
+
+
+    /// Writes the Brain as Markdown files (one folder per project with an INDEX.md and one file
+    /// per memory), removing files it wrote before that no longer exist. Obsidian-compatible.
+    pub fn export_brain(&mut self, dir: &Path) -> Result<usize> {
+        std::fs::create_dir_all(dir)?;
+        let manifest_path = dir.join(".astralis-brain.json");
+        let old: Vec<String> = std::fs::read_to_string(&manifest_path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let mut written: Vec<String> = Vec::new();
+        let projects = self.brain_projects()?;
+        for p in &projects {
+            let folder_rel = sanitize(&p.name);
+            let pdir = dir.join(&folder_rel);
+            std::fs::create_dir_all(&pdir)?;
+            let memories = self.brain_memories(Some(p.folder))?;
+            let mut index = format!("# {}\n\n", p.name);
+            for m in &memories {
+                let file = format!("{}-{}.md", sanitize(&one_line(&m.hook, 48)), m.short);
+                let note = self.get_note(m.id)?;
+                write_if_changed(&pdir.join(&file), &note.body)?;
+                index.push_str(&format!("- [[{}|{}]] · {}\n", file.trim_end_matches(".md"), m.hook, m.kind.as_str()));
+                written.push(format!("{folder_rel}/{file}"));
+            }
+            write_if_changed(&pdir.join("INDEX.md"), &index)?;
+            written.push(format!("{folder_rel}/INDEX.md"));
+        }
+        for f in old.iter().filter(|f| !written.contains(f)) {
+            let _ = std::fs::remove_file(dir.join(f));
+        }
+        write_if_changed(&manifest_path, &serde_json::to_string_pretty(&written)?)?;
+        Ok(written.len())
+    }
+}
+
+/// The lines of `content` most relevant to the query (in their original order).
+fn best_lines(r: &Ranker, q: &[f32], qterms: &HashSet<String>, content: &str, n: usize) -> Vec<String> {
+    let lines: Vec<String> = content
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("```"))
+        .flat_map(|l| if l.len() > 240 { sentences(l) } else { vec![l.to_string()] })
+        .collect();
+    if lines.len() <= n {
+        return lines.into_iter().map(|l| one_line(&l, 240)).collect();
+    }
+    let mut scored: Vec<(usize, f32)> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let words = stems(l);
+            let overlap = if qterms.is_empty() { 0.0 } else { qterms.iter().filter(|t| words.contains(*t)).count() as f32 / qterms.len() as f32 };
+            (i, 0.6 * dot(q, &r.vec(l)) + 0.4 * overlap)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut keep: Vec<usize> = scored.into_iter().take(n).map(|(i, _)| i).collect();
+    keep.sort_unstable();
+    let mut out: Vec<String> = keep.into_iter().map(|i| one_line(&lines[i], 240)).collect();
+    out.push(format!("… ({} more lines — brain_read for all)", lines.len() - n));
+    out
+}
+
+/// Appends the lines of `extra` that `base` doesn't already have.
+fn merge_text(base: &str, extra: &str) -> String {
+    let have: HashSet<String> = base.lines().map(|l| l.trim().to_lowercase()).collect();
+    let mut out = base.trim_end().to_string();
+    for l in extra.lines() {
+        if !l.trim().is_empty() && !have.contains(&l.trim().to_lowercase()) {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(l.trim_end());
+        }
+    }
+    out
+}
+
+fn parse_map(content: &str) -> Vec<MapEntry> {
+    content
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim().strip_prefix("- ")?;
+            let (path, rest) = if let Some(after) = l.strip_prefix('`') {
+                let end = after.find('`')?;
+                (after[..end].to_string(), after[end + 1..].to_string())
+            } else {
+                let (p, r) = l.split_once(" — ")?;
+                (p.to_string(), format!(" — {r}"))
+            };
+            let rest = rest.trim().trim_start_matches('—').trim();
+            let (purpose, mtime) = match rest.rsplit_once("<!--m:") {
+                Some((p, m)) => (p.trim().to_string(), m.trim_end_matches("-->").trim().parse().ok()),
+                None => (rest.to_string(), None),
+            };
+            Some(MapEntry { path, purpose, mtime })
+        })
+        .collect()
+}
+
+fn render_map(entries: &[MapEntry]) -> String {
+    entries
+        .iter()
+        .map(|e| match e.mtime {
+            Some(m) => format!("- `{}` — {} <!--m:{m}-->", e.path, e.purpose),
+            None => format!("- `{}` — {}", e.path, e.purpose),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// "changed" / "gone" if the file isn't as it was when described.
+fn map_status(root: &Path, e: &MapEntry) -> Option<&'static str> {
+    let meta = std::fs::metadata(root.join(&e.path)).ok();
+    match (meta, e.mtime) {
+        (None, _) => Some("gone"),
+        (Some(m), Some(then)) => {
+            let now = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+            (now > then + 1).then_some("changed since described")
+        }
+        _ => None,
+    }
+}
+
+/// A file's modification time in seconds (for code map entries).
+pub fn file_mtime(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
+}
+
+/// A file name from a title: punctuation dropped, spaces collapsed.
+fn sanitize(s: &str) -> String {
+    let out: String = s.chars().map(|c| if c.is_alphanumeric() || " -_()".contains(c) { c } else { ' ' }).collect();
+    let out = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    let out = out.trim_matches(['.', '-', ' ']).to_string();
+    if out.is_empty() { "untitled".into() } else { out }
+}
+
+fn write_if_changed(path: &Path, text: &str) -> Result<()> {
+    if std::fs::read_to_string(path).ok().as_deref() != Some(text) {
+        std::fs::write(path, text)?;
+    }
+    Ok(())
+}

@@ -1,8 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/astralis-core", "apps/desktop/src-tauri", "crates/astralis-net", "crates/astralis-cloud"]
+members = ["crates/astralis-core", "apps/desktop/src-tauri", "crates/astralis-net", "crates/astralis-cloud", "crates/astralis-mcp"]
 # The desktop app needs webkit2gtk on Linux; plain `cargo test` only builds the core.
-default-members = ["crates/astralis-core", "crates/astralis-net", "crates/astralis-cloud"]
+default-members = ["crates/astralis-core", "crates/astralis-net", "crates/astralis-cloud", "crates/astralis-mcp"]
 
 [profile.dev.package."*"]
 # Dependencies (candle, harper, sqlite) are much faster optimized, even in dev builds.

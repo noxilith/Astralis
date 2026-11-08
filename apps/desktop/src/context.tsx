@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { api, errorMessage, type Id, type Note, type NoteKind, type Vault } from './api'
 
-export type View = 'notes' | 'tasks' | 'calendar' | 'planners' | 'graph' | 'templates' | 'settings'
+export type View = 'notes' | 'tasks' | 'calendar' | 'planners' | 'graph' | 'brain' | 'templates' | 'settings'
 
 /** What the notes list in the sidebar shows. */
 export type ListMode = { kind: 'tree' } | { kind: 'archive' } | { kind: 'tag'; tag: string }

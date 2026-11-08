@@ -1,0 +1,14 @@
+[package]
+name = "astralis-mcp"
+version = "0.1.0"
+edition = "2024"
+description = "The Astralis Brain as an MCP server: token-cheap project memory for Claude Code, Codex, Cursor and other AI agents"
+
+[[bin]]
+name = "astralis-mcp"
+path = "src/main.rs"
+
+[dependencies]
+astralis-core = { version = "0.1.0", path = "../astralis-core" }
+serde_json = "1.0.154"
+uuid = "1.29.1"

@@ -1830,3 +1830,132 @@ fn leftover_copies_from_the_old_sync_stay_yours_next_to_the_shared_vault() {
     assert!(!b.accept_shared_vault(mine.id, "A").unwrap());
     assert!(b.get_vault(mine.id).unwrap().owner.is_none());
 }
+
+// ---- the Brain (memory bank for AI agents) ----
+
+#[test]
+fn brain_index_is_small_and_recall_returns_just_the_relevant_lines() {
+    use crate::memory::MemoryKind;
+    let mut s = store();
+    let p = s.brain_project("git@github.com:me/astralis.git", "astralis").unwrap();
+    assert_eq!(s.brain_project("git@github.com:me/astralis.git", "renamed").unwrap(), p, "same key, same project");
+    let me = s.brain_me().unwrap();
+    s.remember(
+        p,
+        MemoryKind::Decision,
+        "Sync is per vault; peers can't write outside shared vaults",
+        "apply_vault_changes checks every row's vault against the SyncScope.\nTombstones carry vault_id.\nOwners alone can delete a shared vault.\nThe old merge-everything sync is gone.",
+        "claude-code",
+    )
+    .unwrap();
+    s.remember(p, MemoryKind::Gotcha, "Python is broken on this machine", "Use node for scripted edits instead of python.", "claude-code").unwrap();
+    s.remember(p, MemoryKind::Howto, "Run the app with ./run.sh app", "./run.sh second opens a second profile window.", "claude-code").unwrap();
+    s.remember(me, MemoryKind::Preference, "Explain changes in plain words", "The user prefers short, plain explanations.", "claude-code").unwrap();
+
+    // The index: one line per memory, grouped, with handles — far smaller than the memories.
+    let ctx = s.brain_context(p, None).unwrap();
+    assert!(ctx.contains("Decisions:") && ctx.contains("Gotchas:") && ctx.contains("Me (applies everywhere):"));
+    assert!(ctx.contains("Python is broken on this machine"));
+    assert!(!ctx.contains("apply_vault_changes"), "details stay out of the index");
+
+    // Recall by meaning: the right memory first, only its relevant lines.
+    let (text, found) = s.brain_recall(p, "who is allowed to delete a shared vault?", 3).unwrap();
+    assert!(found[0].hook.starts_with("Sync is per vault"), "{text}");
+    assert!(text.contains("Owners alone can delete"), "{text}");
+    assert!(text.contains("more lines"), "trimmed: {text}");
+    let (_, found) = s.brain_recall(p, "how do I script file edits", 2).unwrap();
+    assert!(found.iter().any(|m| m.hook.contains("Python")));
+    assert!(s.brain_memory(&found[0].short).unwrap().recall_count >= 1);
+
+    // Saving the same thing again updates the memory instead of duplicating it.
+    let (m, merged) = s
+        .remember(p, MemoryKind::Gotcha, "Python is broken on this machine", "Use node for scripted edits instead of python.\nnvm's node is in ~/.nvm.", "codex")
+        .unwrap();
+    assert!(merged);
+    assert!(m.content.contains("nvm's node") && m.content.matches("Use node").count() == 1);
+    assert_eq!(s.brain_memories(Some(p)).unwrap().len(), 3);
+    // Same point with entirely new details: still one memory.
+    let (_, merged) = s.remember(p, MemoryKind::Gotcha, "Python is broken on this machine!", "The encodings module is missing.", "codex").unwrap();
+    assert!(merged);
+    assert_eq!(s.brain_memories(Some(p)).unwrap().len(), 3);
+
+    // Agent-written memories are "new" until reviewed; stats count what was served.
+    assert!(m.new);
+    assert!(!s.set_memory_reviewed(&m.short, true).unwrap().new);
+    let stats = s.brain_stats().unwrap();
+    assert!(stats.recalls >= 3 && stats.tokens_served > 0);
+}
+
+#[test]
+fn brain_code_map_flags_files_that_changed_since_described() {
+    use crate::memory::{MapEntry, file_mtime};
+    let mut s = store();
+    let p = s.brain_project("/repo", "repo").unwrap();
+    let dir = std::env::temp_dir().join(format!("astralis-map-{}", Uuid::now_v7().simple()));
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/sync.rs"), "a").unwrap();
+    std::fs::write(dir.join("src/gone.rs"), "a").unwrap();
+    let m = |path: &str, purpose: &str| MapEntry { path: path.into(), purpose: purpose.into(), mtime: file_mtime(&dir.join(path)) };
+    s.brain_map_note(p, &[m("src/sync.rs", "Per-vault sync: offers, scope checks"), m("src/gone.rs", "Old code")], "claude-code").unwrap();
+    s.brain_map_note(p, &[m("src/net.rs", "P2P sessions over iroh")], "claude-code").unwrap();
+    assert_eq!(s.brain_map_entries(p).unwrap().len(), 3);
+
+    let found = s.brain_map(p, Some("where is the sync scope checked"), Some(&dir), 1).unwrap();
+    assert!(found.starts_with("src/sync.rs"), "{found}");
+    std::fs::remove_file(dir.join("src/gone.rs")).unwrap();
+    let later = std::time::SystemTime::now() + Duration::from_secs(10);
+    std::fs::File::options().write(true).open(dir.join("src/sync.rs")).unwrap().set_modified(later).unwrap();
+    let all = s.brain_map(p, None, Some(&dir), 50).unwrap();
+    assert!(all.contains("src/sync.rs — Per-vault sync: offers, scope checks (changed since described)"), "{all}");
+    assert!(all.contains("src/gone.rs — Old code (gone)"));
+    // A blank purpose removes a line.
+    s.brain_map_note(p, &[MapEntry { path: "src/gone.rs".into(), purpose: String::new(), mtime: None }], "you").unwrap();
+    assert_eq!(s.brain_map_entries(p).unwrap().len(), 2);
+    assert!(s.brain_context(p, Some(&dir)).unwrap().contains("Code map: 2 files described, 2 changed or gone since"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn brain_tidy_finds_duplicates_and_stale_memories() {
+    use crate::memory::MemoryKind;
+    let mut s = store();
+    let p = s.brain_project("/repo", "repo").unwrap();
+    let (a, _) = s.remember(p, MemoryKind::Fact, "Tests run with cargo test", "cargo test runs core and net tests.", "you").unwrap();
+    // Different enough to be stored separately, but obviously the same subject.
+    let (b, merged) = s.remember(p, MemoryKind::Fact, "Run tests using cargo test", "cargo test runs the core tests and net tests too.", "you").unwrap();
+    assert!(!merged || a.id == b.id);
+    let (old, _) = s.remember(p, MemoryKind::Context, "Old experiment with WebGL graph", "Abandoned.", "you").unwrap();
+    s.conn.execute("UPDATE notes SET updated_at = updated_at - 90 * 86400000 WHERE id = ?1", [old.id.as_bytes()]).unwrap();
+
+    let report = s.brain_tidy(Some(p)).unwrap();
+    if a.id != b.id {
+        assert!(report.duplicates.iter().any(|d| (d.a == a.id && d.b == b.id) || (d.a == b.id && d.b == a.id)), "{report:?}");
+        let kept = s.brain_merge(&a.short, &b.short).unwrap();
+        assert!(kept.content.contains("Run tests using cargo test"));
+        assert!(s.brain_memory(&b.short).is_err(), "archived");
+    }
+    assert_eq!(report.stale, vec![old.id]);
+    let summary = s.brain_compact(&[old.short.clone()], "").unwrap();
+    assert_eq!(summary.kind, MemoryKind::Summary);
+    assert!(summary.content.contains("Old experiment with WebGL graph"));
+}
+
+#[test]
+fn brain_mirrors_to_markdown_files() {
+    use crate::memory::MemoryKind;
+    let mut s = store();
+    let p = s.brain_project("/repo", "My Repo").unwrap();
+    let (m, _) = s.remember(p, MemoryKind::Decision, "Use yrs for note text", "CRDT merges keep both edits.", "claude-code").unwrap();
+    let dir = std::env::temp_dir().join(format!("astralis-brain-{}", Uuid::now_v7().simple()));
+    s.export_brain(&dir).unwrap();
+    let file = dir.join("My Repo").join(format!("Use yrs for note text-{}.md", m.short));
+    assert!(file.exists(), "file names drop punctuation");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.starts_with("---\ntype: decision\nhook: Use yrs for note text"), "{text}");
+    assert!(std::fs::read_to_string(dir.join("My Repo/INDEX.md")).unwrap().contains("Use yrs for note text"));
+    // Forgetting removes the file on the next export.
+    s.forget(&m.short).unwrap();
+    s.export_brain(&dir).unwrap();
+    assert!(!file.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}

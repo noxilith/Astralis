@@ -239,6 +239,8 @@ impl Store {
     }
 
     fn init(conn: Connection) -> Result<Self> {
+        // The app and the Brain's MCP server can write at the same time: wait, don't fail.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -267,6 +269,7 @@ impl Store {
             .chain(std::iter::once(crate::sync::SHARE_MIGRATION.to_string()))
             .chain(std::iter::once(crate::sync::LEGACY_VAULTS_MIGRATION.to_string()))
             .chain(std::iter::once(crate::cloud::CLOUD_MIGRATION.to_string()))
+            .chain(std::iter::once(crate::memory::BRAIN_MIGRATION.to_string()))
             .collect();
         for (i, sql) in all.iter().enumerate().skip(current as usize) {
             let tx = self.conn.transaction()?;

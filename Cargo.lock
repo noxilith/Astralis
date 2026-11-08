@@ -282,6 +282,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "astralis-mcp"
+version = "0.1.0"
+dependencies = [
+ "astralis-core",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "astralis-net"
 version = "0.1.0"
 dependencies = [

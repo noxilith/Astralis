@@ -61,7 +61,9 @@ cmd="${1:-test}"
 [ $# -gt 0 ] && shift
 
 case "$cmd" in
-    app)    need_webkit; need_npm; cd "$APP" && exec npx tauri dev "$@" ;;
+    app)    need_webkit; need_npm
+            cargo build -q -p astralis-mcp   # the Brain's server for AI agents (Settings → Brain)
+            cd "$APP" && exec npx tauri dev "$@" ;;
     second) # A second window with its own profile (own notes + device identity) to try P2P on one machine.
             # Needs `./run.sh app` running (it serves the UI).
             need_webkit; ASTRALIS_PROFILE="${1:-second}" exec "$ROOT/target/debug/astralis-desktop" ;;

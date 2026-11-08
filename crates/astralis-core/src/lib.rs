@@ -9,6 +9,7 @@ pub mod folders;
 pub mod grammar;
 pub mod history;
 pub mod links;
+pub mod memory;
 pub mod merge;
 pub mod notes;
 pub mod planners;
