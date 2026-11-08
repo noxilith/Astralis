@@ -58,7 +58,7 @@
       decisions and conventions instead of re-reading files, so they spend far fewer tokens.
     </td>
     <td width="50%" valign="top">
-      <h3>🛰️ Sync without a server</h3>
+      <h3>📡 Sync without a server</h3>
       Peer-to-peer between your devices, live editing with named carets, shared vaults, and
       Google Drive with end-to-end encryption. No Astralis account, no Astralis cloud.
     </td>
@@ -132,7 +132,7 @@ conventions, gotchas, a map of the code) plus a section about you.
 
 <br clear="right">
 
-## 🛰️ Sync and collaboration
+## 📡 Sync and collaboration
 
 - **Peer-to-peer** between your devices over encrypted QUIC ([iroh](https://iroh.computer)),
   on your network or anywhere through relays. Pair with a 6-digit code.
@@ -226,7 +226,7 @@ flowchart LR
 
 </details>
 
-## 🗺️ Planned
+## 🧭 Planned
 
 More cloud drives (OneDrive, Dropbox, Box, pCloud), biometric unlock, voice-to-text, and a
 fine-tuned Astralis model.
