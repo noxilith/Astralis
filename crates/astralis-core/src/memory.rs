@@ -168,6 +168,23 @@ pub struct TidyReport {
     pub stale: Vec<Uuid>,
 }
 
+/// The Brain as a network: memories, and links between related ones.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainGraph {
+    pub nodes: Vec<Memory>,
+    pub links: Vec<BrainLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainLink {
+    pub a: Uuid,
+    pub b: Uuid,
+    /// How related (0–1).
+    pub strength: f32,
+}
+
 /// One code map line: a file and what it's for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -250,6 +267,28 @@ impl Ranker {
     fn vec(&self, s: &str) -> Vec<f32> {
         self.e.embed_one(s)
     }
+    /// The same vector keeping only its non-zero entries (most are zero): comparing two of
+    /// these is far cheaper, which matters when every memory is compared with many others.
+    fn sparse(&self, s: &str) -> Vec<(u32, f32)> {
+        self.e.embed_one(s).into_iter().enumerate().filter(|(_, v)| *v != 0.0).map(|(i, v)| (i as u32, v)).collect()
+    }
+}
+
+/// Dot product of two sparse vectors (entries sorted by index).
+fn sdot(a: &[(u32, f32)], b: &[(u32, f32)]) -> f32 {
+    let (mut i, mut j, mut sum) = (0, 0, 0.0);
+    while i < a.len() && j < b.len() {
+        match a[i].0.cmp(&b[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                sum += a[i].1 * b[j].1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    sum
 }
 
 fn stems(s: &str) -> HashSet<String> {
@@ -410,16 +449,16 @@ impl Store {
         }
         let vault = self.brain_vault()?;
         let r = Ranker::new();
-        let incoming = r.vec(&format!("{hook}\n{content}"));
-        let incoming_hook = r.vec(&hook);
+        let incoming = r.sparse(&format!("{hook}\n{content}"));
+        let incoming_hook = r.sparse(&hook);
         let existing = self.brain_memories_in(vault, Some(&[folder]))?;
         // The same point (nearly identical hook), or the same thing said overall.
         let twin = existing
             .iter()
             .filter(|m| m.kind != MemoryKind::Codemap && kind != MemoryKind::Codemap)
             .map(|m| {
-                let whole = dot(&incoming, &r.vec(&format!("{}\n{}", m.hook, m.content)));
-                let hooks = dot(&incoming_hook, &r.vec(&m.hook));
+                let whole = sdot(&incoming, &r.sparse(&format!("{}\n{}", m.hook, m.content)));
+                let hooks = sdot(&incoming_hook, &r.sparse(&m.hook));
                 (m, if hooks >= 0.92 { hooks } else { whole })
             })
             .filter(|(_, s)| *s >= 0.86)
@@ -559,12 +598,13 @@ impl Store {
             .collect();
         let r = Ranker::new();
         let q = r.vec(query);
+        let qs = r.sparse(query);
         let qterms = stems(query);
         let mut scored: Vec<(f32, &Memory)> = pool
             .iter()
             .map(|m| {
-                let body = dot(&q, &r.vec(&format!("{}\n{}", m.hook, m.content)));
-                let hook = dot(&q, &r.vec(&m.hook));
+                let body = sdot(&qs, &r.sparse(&format!("{}\n{}", m.hook, m.content)));
+                let hook = sdot(&qs, &r.sparse(&m.hook));
                 let words = stems(&format!("{} {}", m.hook, m.content));
                 let overlap = if qterms.is_empty() { 0.0 } else { qterms.iter().filter(|t| words.contains(*t)).count() as f32 / qterms.len() as f32 };
                 (0.55 * body + 0.25 * hook + 0.2 * overlap + if m.pinned { 0.03 } else { 0.0 }, m)
@@ -677,20 +717,61 @@ impl Store {
         Ok(out)
     }
 
+    /// Every memory (except code maps) and, for each, its few most related memories.
+    pub fn brain_graph(&mut self) -> Result<BrainGraph> {
+        let nodes: Vec<Memory> = self.brain_memories(None)?.into_iter().filter(|m| m.kind != MemoryKind::Codemap).collect();
+        let r = Ranker::new();
+        let vecs: Vec<Vec<(u32, f32)>> = nodes.iter().map(|m| r.sparse(&format!("{}\n{}", m.hook, m.content))).collect();
+        // Memories link within their project, and with Me (which links with everything).
+        let me = self.brain_me()?;
+        let mut by_folder: std::collections::HashMap<Uuid, Vec<usize>> = std::collections::HashMap::new();
+        for (i, m) in nodes.iter().enumerate() {
+            by_folder.entry(m.folder).or_default().push(i);
+        }
+        let everyone: Vec<usize> = (0..nodes.len()).collect();
+        let none: Vec<usize> = Vec::new();
+        let mut seen = HashSet::new();
+        let mut links = Vec::new();
+        for i in 0..nodes.len() {
+            let folder = nodes[i].folder;
+            let candidates = if folder == me {
+                everyone.iter()
+            } else {
+                by_folder.get(&folder).unwrap_or(&none).iter()
+            };
+            let extra = if folder == me { none.iter() } else { by_folder.get(&me).unwrap_or(&none).iter() };
+            let mut best: Vec<(usize, f32)> = candidates
+                .chain(extra)
+                .copied()
+                .filter(|&j| j != i)
+                .map(|j| (j, sdot(&vecs[i], &vecs[j])))
+                .filter(|(_, s)| *s >= 0.22)
+                .collect();
+            best.sort_by(|a, b| b.1.total_cmp(&a.1));
+            for (j, s) in best.into_iter().take(3) {
+                let key = (i.min(j), i.max(j));
+                if seen.insert(key) {
+                    links.push(BrainLink { a: nodes[key.0].id, b: nodes[key.1].id, strength: s });
+                }
+            }
+        }
+        Ok(BrainGraph { nodes, links })
+    }
+
     // ---- keeping it small ----
 
     /// Duplicates, maybe-conflicting pairs and stale memories in a project (or everywhere).
     pub fn brain_tidy(&mut self, folder: Option<Uuid>) -> Result<TidyReport> {
         let all: Vec<Memory> = self.brain_memories(folder)?.into_iter().filter(|m| m.kind != MemoryKind::Codemap).collect();
         let r = Ranker::new();
-        let vecs: Vec<Vec<f32>> = all.iter().map(|m| r.vec(&format!("{}\n{}", m.hook, m.content))).collect();
+        let vecs: Vec<Vec<(u32, f32)>> = all.iter().map(|m| r.sparse(&format!("{}\n{}", m.hook, m.content))).collect();
         let mut report = TidyReport::default();
         for i in 0..all.len() {
             for j in i + 1..all.len() {
                 if all[i].folder != all[j].folder {
                     continue;
                 }
-                let s = dot(&vecs[i], &vecs[j]);
+                let s = sdot(&vecs[i], &vecs[j]);
                 let pair = || TidyPair { a: all[i].id, b: all[j].id, a_hook: all[i].hook.clone(), b_hook: all[j].hook.clone(), score: s };
                 if s >= 0.8 {
                     report.duplicates.push(pair());
@@ -766,7 +847,14 @@ impl Store {
         match self.get_setting(MIRROR_KEY)?.as_deref() {
             Some("off") => Ok(None),
             Some(p) if !p.trim().is_empty() => Ok(Some(std::path::PathBuf::from(p))),
-            _ => Ok(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(|h| std::path::PathBuf::from(h).join("Astralis Brain"))),
+            // Each profile mirrors to its own folder (so a test profile never mixes into yours).
+            _ => {
+                let name = match std::env::var("ASTRALIS_PROFILE") {
+                    Ok(p) if !p.trim().is_empty() => format!("Astralis Brain ({})", p.trim()),
+                    _ => "Astralis Brain".to_string(),
+                };
+                Ok(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(|h| std::path::PathBuf::from(h).join(name)))
+            }
         }
     }
 
@@ -810,6 +898,10 @@ impl Store {
         }
         for f in old.iter().filter(|f| !written.contains(f)) {
             let _ = std::fs::remove_file(dir.join(f));
+            // Remove the project folder too once it's empty (remove_dir fails if it isn't).
+            if let Some(parent) = Path::new(f).parent().filter(|p| !p.as_os_str().is_empty()) {
+                let _ = std::fs::remove_dir(dir.join(parent));
+            }
         }
         write_if_changed(&manifest_path, &serde_json::to_string_pretty(&written)?)?;
         Ok(written.len())

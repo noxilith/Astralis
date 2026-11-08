@@ -7,6 +7,8 @@
 #   ./run.sh build        Build release installers
 #   ./run.sh ui           Run just the frontend in a browser (with a mock backend)
 #   ./run.sh fetch-model  Download the in-app AI model (~90 MB, one time)
+#   ./run.sh seed-test-brain [--fresh] [profile]
+#                         Fill the Brain with 1,000 test memories (--fresh replaces earlier ones)
 #   ./run.sh seed-test-vault [profile]
 #                         Make a "Test galaxy" vault with 1,000 notes (default profile: galaxy-test;
 #                         open it with `./run.sh second galaxy-test`; "main" = your own data, app closed)
@@ -23,6 +25,22 @@ cd "$ROOT"
 if ! command -v x86_64-linux-gnu-gcc >/dev/null 2>&1 && command -v gcc >/dev/null 2>&1; then
     export CC="${CC:-gcc}"
     export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-gcc}"
+fi
+# Keep builds within memory. llama.cpp's GPU code takes several GB per file to compile, and cargo
+# and llama.cpp's own build each run a job per core at the same time; on a laptop without swap
+# that can freeze the whole system. Fewer jobs at once, and llama.cpp without debug info (which
+# is most of that memory). Override with CARGO_BUILD_JOBS=… if you have RAM to spare.
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+export LLAMA_LIB_PROFILE="${LLAMA_LIB_PROFILE:-Release}"
+
+# llama.cpp (the "Ask Astralis" model runner) is C++, built with cmake.
+if ! command -v x86_64-linux-gnu-g++ >/dev/null 2>&1 && command -v g++ >/dev/null 2>&1; then
+    export CXX="${CXX:-g++}"
+fi
+# Its Rust bindings are made by bindgen, which needs C headers like stdbool.h. Without a full
+# clang install, use GCC's copies.
+if ! command -v clang >/dev/null 2>&1 && command -v gcc >/dev/null 2>&1 && [[ -z "${BINDGEN_EXTRA_CLANG_ARGS:-}" ]]; then
+    export BINDGEN_EXTRA_CLANG_ARGS="-I$(gcc -print-file-name=include)"
 fi
 
 # A webkit2gtk built from source into a custom prefix (default ~/.local/webkit) needs to be
@@ -57,12 +75,69 @@ need_npm() {
     [[ -d "$APP/node_modules" ]] || (cd "$APP" && npm install)
 }
 
+# llama.cpp runs "Ask Astralis" on the graphics chip through Vulkan. Building that needs the
+# SPIRV-Headers (header-only, from Khronos); when the system doesn't have them, fetch them once
+# into .deps/ and point the build there (llama.cpp looks under $VULKAN_SDK).
+need_spirv() {
+    local prefix="$ROOT/.deps/spirv-headers" tag="vulkan-sdk-1.4.328.0"
+    if ls /usr/share/cmake/SPIRV-Headers /usr/lib*/cmake/SPIRV-Headers /usr/local/share/cmake/SPIRV-Headers >/dev/null 2>&1; then
+        return
+    fi
+    if [[ ! -f "$prefix/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake" ]]; then
+        echo "Fetching SPIRV-Headers ($tag) for the GPU build (one time)…"
+        local src="$ROOT/.deps/spirv-headers-src"
+        rm -rf "$src" && mkdir -p "$src"
+        curl -fsSL "https://github.com/KhronosGroup/SPIRV-Headers/archive/refs/tags/$tag.tar.gz" | tar -xz -C "$src" --strip-components=1
+        cmake -S "$src" -B "$src/build" -DCMAKE_INSTALL_PREFIX="$prefix" -DSPIRV_HEADERS_ENABLE_TESTS=OFF -DSPIRV_HEADERS_ENABLE_INSTALL=ON >/dev/null
+        cmake --install "$src/build" >/dev/null
+        rm -rf "$src"
+    fi
+    # Some glslc builds (e.g. shaderc 2026.x) have a newer front end than optimizer: they compile
+    # recent shader features (NVIDIA coopmat2, FP4…) but then fail to optimize them ("Invalid
+    # capability operand"), which breaks the build. llama.cpp finds glslc under $VULKAN_SDK/bin
+    # first, so a small wrapper there retries such a shader without -O (the GPU driver optimizes
+    # shaders itself when it loads them).
+    local real wrapper="$prefix/bin/glslc"
+    real="$(command -v glslc || true)"
+    if [[ -n "$real" ]] && ! grep -q "astralis-glslc-wrapper v4" "$wrapper" 2>/dev/null; then
+        mkdir -p "$prefix/bin"
+        cat > "$wrapper" <<EOF
+#!/usr/bin/env bash
+# astralis-glslc-wrapper v4 — made by run.sh (see need_spirv there).
+err="\$(mktemp)"
+trap 'rm -f "\$err"' EXIT
+"$real" "\$@" 2>"\$err" && { cat "\$err" >&2; exit 0; }
+code=\$?
+if grep -q "failed to optimize" "\$err"; then
+    args=()
+    for a in "\$@"; do [[ "\$a" == -O ]] || args+=("\$a"); done
+    rm -f "\$err"
+    exec "$real" "\${args[@]}"
+fi
+cat "\$err" >&2
+exit \$code
+EOF
+        chmod +x "$wrapper"
+    fi
+    export VULKAN_SDK="${VULKAN_SDK:-$prefix}"
+    # llama.cpp includes <spirv/unified1/spirv.hpp> as if it were installed system-wide.
+    export CPLUS_INCLUDE_PATH="$prefix/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
+}
+
 cmd="${1:-test}"
 [ $# -gt 0 ] && shift
 
 case "$cmd" in
+    app|build|test|check|clippy|seed-test-brain|seed-test-vault) need_spirv ;;
+esac
+
+case "$cmd" in
     app)    need_webkit; need_npm
-            cargo build -q -p astralis-mcp   # the Brain's server for AI agents (Settings → Brain)
+            # The Brain's server for AI agents (Brain → Connect). Shows progress: it can take a
+            # minute after updates.
+            echo "Building the Brain server (astralis-mcp)…"
+            cargo build -p astralis-mcp
+            echo "Starting Astralis…"
             cd "$APP" && exec npx tauri dev "$@" ;;
     second) # A second window with its own profile (own notes + device identity) to try P2P on one machine.
             # Needs `./run.sh app` running (it serves the UI).
@@ -70,6 +145,23 @@ case "$cmd" in
     build)  need_webkit; need_npm; cd "$APP" && exec npx tauri build "$@" ;;
     ui)     need_npm; cd "$APP" && exec npm run dev -- --open "$@" ;;
     test)   exec cargo test "$@" ;;
+    seed-test-brain)
+            DATA="${XDG_DATA_HOME:-$HOME/.local/share}/app.astralis.desktop"
+            fresh=""
+            if [[ "${1:-}" == "--fresh" ]]; then fresh="--fresh"; shift; fi
+            profile="${1:-galaxy-test}"
+            if [[ "$profile" == "main" ]]; then
+                if pgrep -f "target/(debug|release)/astralis-desktop" >/dev/null; then
+                    echo "Close Astralis first — it's using your main data." >&2
+                    exit 1
+                fi
+                db="$DATA/astralis.db"
+            else
+                db="$DATA/profile-$profile/astralis.db"
+            fi
+            cargo run -q --release -p astralis-core --example seed_test_brain -- $fresh "$db"
+            [[ "$profile" == "main" ]] || echo "Open it with:  ./run.sh second $profile   (needs ./run.sh app running), then Brain → Graph"
+            ;;
     seed-test-vault)
             DATA="${XDG_DATA_HOME:-$HOME/.local/share}/app.astralis.desktop"
             profile="${1:-galaxy-test}"
@@ -100,5 +192,5 @@ case "$cmd" in
         done
         echo "Model ready in $MODEL_DIR"
         ;;
-    *) echo "Unknown command: $cmd (use app|second|test|build|ui|fetch-model|seed-test-vault|check|clippy|fmt|clean)" >&2; exit 1 ;;
+    *) echo "Unknown command: $cmd (use app|second|test|build|ui|fetch-model|seed-test-vault|seed-test-brain|check|clippy|fmt|clean)" >&2; exit 1 ;;
 esac

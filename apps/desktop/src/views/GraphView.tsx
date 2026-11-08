@@ -4,8 +4,9 @@ import { api } from '../api'
 import { useApp } from '../context'
 import { createSpace, type GalaxyInput, type SpaceHandle } from './space'
 
-/** Every vault as a galaxy, every note a star. Drag to pan, scroll to zoom, click a star to open
- *  it, click a galaxy to fly there. */
+/** Every vault as a 3D galaxy: linked notes form solar systems (the most-linked note is the sun),
+ *  unlinked notes are lone stars. Drag to turn, Ctrl + scroll to zoom, right-drag to slide; click
+ *  a galaxy or system to fly there, a planet or star to open it. */
 export function GraphView() {
   const { openNote, version, fail, vaultId, vaults } = useApp()
   const canvas = useRef<HTMLCanvasElement>(null)
@@ -81,10 +82,11 @@ export function GraphView() {
           </button>
         ))}
       </div>
+      <div className="space-hint">Drag to turn · Ctrl + scroll to zoom · Right-drag to slide · Click a system to fly in · Esc to go back</div>
       {total === 0 && galaxies.length > 0 && (
         <div className="space-empty">
           <b>Empty space, for now</b>
-          <span>Every note you write becomes a star here; [[links]] draw constellations between them.</span>
+          <span>Every note you write becomes a star here; notes you [[link]] together form solar systems.</span>
         </div>
       )}
     </div>

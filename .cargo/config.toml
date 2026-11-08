@@ -1,0 +1,11 @@
+# Build for x86-64-v3 (AVX2, FMA, F16C: every x86 PC since about 2013-2015). The in-app AI models
+# (candle, llama.cpp) only use fast vector math when it's enabled here; without it they run
+# several times slower. A PC older than that can't run the app.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-cpu=x86-64-v3"]

@@ -21,7 +21,16 @@ uuid = { version = "1.29.1", features = ["serde", "v7"] }
 yrs = "0.28.1"
 zeroize = "1.9.1"
 
+# The "Ask Astralis" model runner, on the graphics chip: Vulkan (Intel, AMD, NVIDIA) on Linux and
+# Windows, Metal on macOS.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+llama-cpp-2 = { version = "0.1.161", optional = true, features = ["vulkan"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+llama-cpp-2 = { version = "0.1.161", optional = true, features = ["metal"] }
+
 [features]
 default = ["ml"]
-# In-app neural embedding model (candle). Without it the Brain uses a built-in lexical embedder.
-ml = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+# The in-app models: embeddings (candle) and the "Ask Astralis" writer (llama.cpp). Without it
+# the Brain uses a built-in lexical embedder and Ask Astralis is unavailable.
+ml = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:llama-cpp-2"]

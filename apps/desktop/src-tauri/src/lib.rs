@@ -1,3 +1,4 @@
+mod assistant_cmds;
 mod brain_cmds;
 mod cloud;
 mod commands;
@@ -23,6 +24,8 @@ pub struct AppState {
     pub grammar: Mutex<Option<Grammar>>,
     /// Google Drive sign-in (cloud vaults).
     pub cloud: cloud::Cloud,
+    /// "Ask Astralis": the local writing model.
+    pub assistant: assistant_cmds::Assistant,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -119,7 +122,11 @@ pub fn run() {
                 brain: Mutex::new(brain),
                 grammar: Mutex::new(None),
                 cloud: Default::default(),
+                assistant: Default::default(),
             });
+            // One copy of the model for every profile.
+            let _ = state.assistant.dir.set(app.path().app_data_dir()?.join("models").join("phi-3-mini-4k"));
+            assistant_cmds::spawn_idle_unload(state.clone());
             app.manage(state.clone());
             spawn_reminder_loop(app.handle().clone(), state.clone());
             spawn_brain_loop(app.handle().clone(), state.clone());

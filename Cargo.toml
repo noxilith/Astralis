@@ -7,3 +7,6 @@ default-members = ["crates/astralis-core", "crates/astralis-net", "crates/astral
 [profile.dev.package."*"]
 # Dependencies (candle, harper, sqlite) are much faster optimized, even in dev builds.
 opt-level = 2
+# No debug info for dependencies: it made the dev binary over 1 GB and linking it took several GB
+# of memory.
+debug = false

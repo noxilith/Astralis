@@ -22,6 +22,7 @@ const templates: Template[] = [
   { id: id(), name: 'Daily Journal', title: 'Journal — {{date}}', body: '## Today\n\n## Reflection\n', builtin: true, createdAt: now(), updatedAt: now() },
 ]
 
+let assistantReady = false
 const mockMe = { name: "noxilith", color: "#8b7bff" }
 const google: { clientId: string | null; email: string | null } = { clientId: null, email: null }
 const invites = new Map<string, { email: string; acceptedBy: string | null }[]>()
@@ -29,6 +30,10 @@ const mem = (folder: string, project: string, kind: string, hook: string, source
   id: id(), short: Math.random().toString(16).slice(2, 8), folder, project, kind, hook, content: '', source, new: isNew, pinned: false,
   updatedAt: now() - daysAgo * 86400000, recalledAt: recallCount ? now() - 3600000 : null, recallCount,
 })
+const skills = [
+  { target: 'claude', path: '/home/you/.claude/skills/astralis-brain/SKILL.md', state: 'missing' },
+  { target: 'codex', path: '/home/you/.codex/skills/astralis-brain/SKILL.md', state: 'outdated' },
+]
 const brainMems = [
   mem('me', 'Me', 'preference', 'Explain changes in plain words, no jargon', 'claude-code', false, 31),
   mem('me', 'Me', 'preference', 'Uses fish shell; give bash blocks for commands', 'claude-code', false, 12),
@@ -39,6 +44,13 @@ const brainMems = [
   mem('astralis', 'astralis', 'context', 'Old WebGL graph experiment (abandoned)', 'codex', false, 0, 80),
   mem('astralis', 'astralis', 'decision', 'Note text merges as a yrs CRDT; the editor binds to Yjs', 'claude-code', true, 2),
 ]
+const extraMems = (() => {
+  const kinds = ['decision', 'gotcha', 'howto', 'fact', 'context', 'preference']
+  const projects: [string, number][] = [['astralis', 40], ['website', 22], ['dotfiles', 12], ['Me', 6]]
+  const out: ReturnType<typeof mem>[] = []
+  for (const [p, n] of projects) for (let i = 0; i < n; i++) out.push(mem(p === 'Me' ? 'me' : p, p, kinds[(i * 5 + p.length) % kinds.length], `${p} memory ${i + 1}`, i % 3 ? 'claude-code' : 'codex', i % 7 === 0, (i * 3) % 9))
+  return out
+})()
 const docs = new Map<string, Y.Doc>()
 const docFor = (noteId: string) => {
   const n = notes.find((x) => x.id === noteId)!
@@ -259,6 +271,23 @@ const handlers: Record<string, (a: Args) => unknown> = {
   cloud_uninvite: ({ vaultId, email }) => void invites.set(vaultId, (invites.get(vaultId) ?? []).filter((i: { email: string }) => i.email !== email)),
   cloud_join: () => 'Shared vault',
   cloud_sync_now: () => undefined,
+  // Ask Astralis (pretend: canned replies).
+  assistant_status: () => ({ ready: assistantReady, downloading: false, loaded: assistantReady, quickPrompts: [
+    ['Be brutally honest', 'Is this a good idea? Be brutally honest.'],
+    ['Will it pay off?', 'Will this pay off?'],
+    ['Make a plan', 'Make a concrete plan.'],
+    ['Write it up', 'Rewrite this note so it explains the idea, lists its features and ends with a plan.'],
+    ['Give me ideas', 'Give me some ideas worth building.'],
+  ] }),
+  assistant_download: () => void (assistantReady = true),
+  assistant_chat: ({ message }) =>
+    /idea/i.test(message)
+      ? "### 1. Plant Doctor — snap a photo of a sick houseplant, get the likely cause\n**Why it could work:** new plant owners panic and search for help.\n**Competition:** crowded (PictureThis, Planta).\n**Will it pay off?** Long shot — 2–3 months for a likely few hundred users.\n\n### 2. <your city> Gig Board — local one-off jobs for students\n**Why it could work:** small, local, easy to test.\n**Competition:** Craigslist, Facebook groups.\n**Will it pay off?** Worth it as a learning project — a weekend to build.\n\n**My pick:** the gig board: you can test it this week with a simple form."
+      : /pay off|honest/i.test(message)
+      ? "**Verdict:** Weak idea — fun premise, but nothing yet that makes players pick it.\n\nA cozy farming game is one of the most crowded genres on Steam, and \"farming + space\" alone isn't a hook players will notice.\n\n**ROI:** 12–18 months solo for a likely few thousand sales. Unless you can show a unique mechanic in a 30-second clip, it won't pay off.\n\n**Biggest risks**\n- No clear reason to pick it over Stardew Valley\n- Scope creep (crops × planets × seasons)\n\n**Make it better:** prototype the one mechanic that's new (e.g. low-gravity crops) in 2 weeks and test it on 20 players before committing."
+      : "# Starfield Farm\n\nA cozy farming game set on small planets, where gravity and day length change how crops grow.\n\n## Features\n- Planet-hopping farms with different gravity\n- Crops that adapt to each planet\n- Trading between colonies\n\n## Plan\n1. **Weeks 1–2:** prototype low-gravity crop growth\n2. **Weeks 3–6:** one planet, full farming loop\n3. **Weeks 7–10:** second planet + trading\n4. **Weeks 11–12:** polish, Steam page, demo\n\n**First step today:** sketch the crop-growth rules on paper.",
+  assistant_cancel: () => undefined,
+  assistant_unload: () => undefined,
   // The Brain (pretend).
   brain_projects: () => [
     { folder: 'me', name: 'Me', count: 2, newCount: 0 },
@@ -274,9 +303,27 @@ const handlers: Record<string, (a: Args) => unknown> = {
   }),
   brain_merge: ({ keep }) => find(brainMems, keep),
   brain_compact: ({ ids }) => find(brainMems, ids[0]),
+  brain_graph: () => {
+    const nodes = [...brainMems, ...extraMems]
+    const links: { a: string; b: string; strength: number }[] = []
+    nodes.forEach((n, i) => {
+      for (let k = 1; k <= 2; k++) {
+        const j = (i * 7 + k * 13) % nodes.length
+        if (j !== i && (nodes[j].project === n.project || (i + k) % 5 === 0)) links.push({ a: n.id, b: nodes[j].id, strength: 0.3 + ((i * k) % 5) / 10 })
+      }
+    })
+    return { nodes, links }
+  },
   brain_stats: () => ({ recalls: 148, tokensServed: 23100, tokensSaved: 412800 }),
   brain_setup: () => ({ server: '/home/you/Projects/Astralis/target/debug/astralis-mcp', serverExists: true, args: [], mirror: '/home/you/Astralis Brain', vault: 'brain' }),
   brain_set_mirror: ({ enabled }) => (enabled ? '/home/you/Astralis Brain' : null),
+  brain_skill_status: () => skills,
+  brain_install_skill: ({ target }) => {
+    const s = skills.find((x) => x.target === target)!
+    s.state = 'installed'
+    return s.path
+  },
+  brain_skill_text: () => '---\nname: astralis-brain\n…',
   open_url: ({ url }) => void window.open(url, '_blank'),
   vault_share: ({ vaultId, peer }) => { const v = find(vaults, vaultId); v.sharedWith = [...new Set([...v.sharedWith, peer])]; return v },
   vault_unshare: ({ vaultId, peer }) => { const v = find(vaults, vaultId); v.sharedWith = v.sharedWith.filter((p: string) => p !== peer); return v },

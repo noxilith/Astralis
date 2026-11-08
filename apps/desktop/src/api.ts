@@ -148,11 +148,15 @@ export interface Memory {
   id: Id; short: string; folder: Id; project: string; kind: MemoryKind; hook: string; content: string
   source: string; new: boolean; pinned: boolean; updatedAt: Ms; recalledAt: Ms | null; recallCount: number
 }
+export interface BrainGraph { nodes: Memory[]; links: { a: Id; b: Id; strength: number }[] }
 export interface BrainProject { folder: Id; name: string; count: number; newCount: number }
 export interface BrainStats { recalls: number; tokensServed: number; tokensSaved: number }
 export interface TidyPair { a: Id; b: Id; aHook: string; bHook: string; score: number }
 export interface TidyReport { duplicates: TidyPair[]; similar: TidyPair[]; stale: Id[] }
+export interface SkillStatus { target: 'claude' | 'codex'; path: string; state: 'missing' | 'installed' | 'outdated' }
 export interface BrainSetup { server: string; serverExists: boolean; args: string[]; mirror: string | null; vault: Id }
+export interface ChatTurn { role: 'user' | 'assistant'; text: string }
+export interface AssistantStatus { ready: boolean; downloading: boolean; loaded: boolean; quickPrompts: [string, string][] }
 export interface GoogleStatus { configured: boolean; builtin: boolean; clientId: string | null; email: string | null }
 export interface CloudInvite { email: string; acceptedBy: string | null }
 
@@ -278,6 +282,14 @@ export const api = {
   cloudSyncNow: () => call<void>('cloud_sync_now'),
   openUrl: (url: string) => call<void>('open_url', { url }),
 
+  // Ask Astralis (the local writing model)
+  assistantStatus: () => call<AssistantStatus>('assistant_status'),
+  assistantDownload: () => call<void>('assistant_download'),
+  assistantChat: (requestId: string, noteId: Id, history: ChatTurn[], message: string) =>
+    call<string>('assistant_chat', { requestId, noteId, history, message }),
+  assistantCancel: (requestId: string) => call<void>('assistant_cancel', { requestId }),
+  assistantUnload: () => call<void>('assistant_unload'),
+
   // The Brain (memory for AI agents)
   brainProjects: () => call<BrainProject[]>('brain_projects'),
   brainMemories: (folder: Id | null) => call<Memory[]>('brain_memories', { folder }),
@@ -287,8 +299,12 @@ export const api = {
   brainMerge: (keep: Id, other: Id) => call<Memory>('brain_merge', { keep, other }),
   brainCompact: (ids: Id[], hook: string) => call<Memory>('brain_compact', { ids, hook }),
   brainStats: () => call<BrainStats>('brain_stats'),
+  brainGraph: () => call<BrainGraph>('brain_graph'),
   brainSetup: () => call<BrainSetup>('brain_setup'),
   brainSetMirror: (enabled: boolean, dir: string | null) => call<string | null>('brain_set_mirror', { enabled, dir }),
+  brainSkillStatus: () => call<SkillStatus[]>('brain_skill_status'),
+  brainInstallSkill: (target: 'claude' | 'codex') => call<string>('brain_install_skill', { target }),
+  brainSkillText: () => call<string>('brain_skill_text'),
   moveNoteToVault: (noteId: Id, vaultId: Id) => call<Note>('move_note_to_vault', { noteId, vaultId }),
 
   // settings

@@ -6,6 +6,7 @@ import {
   FilePlus2,
   FolderInput,
   History,
+  Info,
   Lock,
   MoreHorizontal,
   PanelRight,
@@ -33,7 +34,11 @@ import { folderPath } from '../components/NotesNav'
 import { Empty, Modal, Spinner, useConfirm, useDebounced, usePrompt } from '../components/ui'
 import { relativeTime } from '../lib/time'
 import { NotePanel } from './NotePanel'
+import { AssistantPanel } from '../components/AssistantPanel'
 import { HistoryModal } from './HistoryModal'
+
+type SideTab = 'details' | 'chat'
+const SIDE_TAB_KEY = 'astralis.sidePanelTab'
 
 /** The main area for notes: the open note or whiteboard, its toolbar and side panel. */
 export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
@@ -45,6 +50,33 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
   const [editorKey, setEditorKey] = useState(0)
   const [preview, setPreview] = useState(false)
   const [showPanel, setShowPanel] = useState(true)
+  // The side panel's tab: the note's details, or the chat with the built-in AI (remembered).
+  const [tab, setTab] = useState<SideTab>(() => {
+    try {
+      return localStorage.getItem(SIDE_TAB_KEY) === 'chat' ? 'chat' : 'details'
+    } catch {
+      return 'details'
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDE_TAB_KEY, tab)
+    } catch {
+      /* not saved; fine */
+    }
+  }, [tab])
+  const panelOpen = showPanel && !!current && current.kind !== 'whiteboard'
+  // Once opened, the chat stays mounted while the panel is open, so a reply keeps writing while
+  // the details tab is showing. Closing the panel (or leaving the editor) frees the model's memory.
+  const [chatMounted, setChatMounted] = useState(false)
+  useEffect(() => {
+    if (!panelOpen) setChatMounted(false)
+    else if (tab === 'chat') setChatMounted(true)
+  }, [panelOpen, tab])
+  useEffect(() => {
+    if (!chatMounted) return
+    return () => void api.assistantUnload().catch(() => {})
+  }, [chatMounted])
   const [grammar, setGrammar] = useState(true)
   const [showHistory, setShowHistory] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -254,7 +286,21 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
 
   const isBoard = current.kind === 'whiteboard'
   const readOnly = !!current.archivedAt
-  const panel = showPanel && !isBoard && !current.encrypted
+  const panel = panelOpen
+
+  /** Puts assistant text into the note (through the editor when open, so it saves, syncs and undoes). */
+  const putIntoNote = (text: string, mode: 'replace' | 'append') => {
+    const view = viewRef.current
+    if (view && !readOnly) {
+      const len = view.state.doc.length
+      const insert = mode === 'replace' ? text : (len ? '\n\n' : '') + text
+      view.dispatch({ changes: mode === 'replace' ? { from: 0, to: len, insert } : { from: len, insert } })
+      toast(mode === 'replace' ? 'Note replaced — Ctrl+Z to undo' : 'Added to the note')
+      return
+    }
+    const body = mode === 'replace' ? text : `${draft.current?.body ?? current.body}\n\n${text}`
+    api.updateNote(current.id, { body }).then((n) => (replaceCurrent(n, true), toast('Note updated'))).catch(fail)
+  }
 
   return (
     <div className={'split' + (panel ? ' split-editor' : '')} style={panel ? undefined : { gridTemplateColumns: 'minmax(0,1fr)' }}>
@@ -306,8 +352,8 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
             {!isBoard && (
               <AiMenu note={current} readOnly={readOnly} onTidy={() => openTidy(fixSpelling)} onChange={(n, remount) => replaceCurrent(n, remount)} />
             )}
-            {!isBoard && !current.encrypted && (
-              <button className={'icon-btn' + (showPanel ? ' active' : '')} title="Side panel" onClick={() => setShowPanel((s) => !s)}>
+            {!isBoard && (
+              <button className={'icon-btn side-btn' + (showPanel ? ' active' : '')} title="Side panel: details and chat" onClick={() => setShowPanel((s) => !s)}>
                 <PanelRight size={16} />
               </button>
             )}
@@ -426,8 +472,29 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
       </div>
 
       {panel && (
-        <div className="pane">
-          <NotePanel note={current} readOnly={readOnly} onChange={(n, remount) => replaceCurrent(n, remount)} onOpenLink={openLink} />
+        <div className="pane side-pane">
+          <div className="side-tabs" role="tablist">
+            <button role="tab" aria-selected={tab === 'details'} className={tab === 'details' ? 'active' : ''} onClick={() => setTab('details')}>
+              <Info size={14} /> Details
+            </button>
+            <button role="tab" aria-selected={tab === 'chat'} className={tab === 'chat' ? 'active' : ''} onClick={() => setTab('chat')}>
+              <Sparkles size={14} /> Chat
+            </button>
+          </div>
+          <div className="side-body" hidden={tab !== 'details'}>
+            {current.encrypted ? (
+              <p className="small muted side-locked">
+                <Lock size={13} /> This note is encrypted, so its tags, links and tasks aren't shown here.
+              </p>
+            ) : (
+              <NotePanel note={current} readOnly={readOnly} onChange={(n, remount) => replaceCurrent(n, remount)} onOpenLink={openLink} />
+            )}
+          </div>
+          {chatMounted && (
+            <div className="side-body side-chat" hidden={tab !== 'chat'}>
+              <AssistantPanel key={current.id} note={current} onReplace={(t) => putIntoNote(t, 'replace')} onAppend={(t) => putIntoNote(t, 'append')} />
+            </div>
+          )}
         </div>
       )}
 

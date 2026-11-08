@@ -1959,3 +1959,18 @@ fn brain_mirrors_to_markdown_files() {
     assert!(!file.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn brain_graph_links_related_memories() {
+    use crate::memory::MemoryKind;
+    let mut s = store();
+    let p = s.brain_project("/repo", "repo").unwrap();
+    s.remember(p, MemoryKind::Howto, "Run the tests with cargo test", "cargo test runs every crate's tests.", "you").unwrap();
+    s.remember(p, MemoryKind::Gotcha, "cargo test needs CC=gcc on this machine", "Linking fails without gcc as the linker.", "you").unwrap();
+    s.remember(p, MemoryKind::Preference, "Dark theme for screenshots", "Use the dark theme.", "you").unwrap();
+    let g = s.brain_graph().unwrap();
+    assert_eq!(g.nodes.len(), 3);
+    let hook = |id: Uuid| g.nodes.iter().find(|n| n.id == id).unwrap().hook.clone();
+    assert!(g.links.iter().any(|l| hook(l.a).contains("cargo") && hook(l.b).contains("cargo")), "{:?}", g.links);
+    assert!(!g.links.iter().any(|l| hook(l.a).contains("Dark") || hook(l.b).contains("Dark")));
+}

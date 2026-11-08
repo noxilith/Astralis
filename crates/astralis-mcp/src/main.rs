@@ -301,6 +301,11 @@ fn main() {
             _ => {}
         }
     }
+    if let Some(p) = profile.as_deref().filter(|p| !p.is_empty()) {
+        // Same profile → same mirror folder as that app window (see Store::brain_mirror_dir).
+        // Safe: nothing else is running yet.
+        unsafe { std::env::set_var("ASTRALIS_PROFILE", p) };
+    }
     let db = db.unwrap_or_else(|| {
         let dir = data_dir();
         match profile.filter(|p| !p.is_empty()) {

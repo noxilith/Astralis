@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { Archive, Bot, Brain, Check, CheckCheck, Copy, Eye, Layers, Merge, PlugZap, Search, Sparkles, Trash2, User } from 'lucide-react'
-import { api, type BrainProject, type BrainSetup, type BrainStats, type Memory, type MemoryKind, type TidyReport } from '../api'
+import { Archive, Bot, Brain, Check, CheckCheck, Copy, Eye, Layers, Merge, Network, PlugZap, Scan, Search, Sparkles, Trash2, User } from 'lucide-react'
+import { createNeural, KIND_HUE, type NeuralHandle } from './neural'
+import { api, type BrainProject, type BrainSetup, type BrainStats, type Memory, type MemoryKind, type SkillStatus, type TidyReport } from '../api'
 import { useApp } from '../context'
 import { Empty, Spinner, useConfirm } from '../components/ui'
 import { relativeTime } from '../lib/time'
@@ -28,7 +29,7 @@ export function BrainView() {
   const [folder, setFolder] = useState<string | null>(null)
   const [memories, setMemories] = useState<Memory[]>([])
   const [stats, setStats] = useState<BrainStats | null>(null)
-  const [tab, setTab] = useState<'memories' | 'tidy' | 'connect'>('memories')
+  const [tab, setTab] = useState<'memories' | 'graph' | 'tidy' | 'connect'>('memories')
   const [filter, setFilter] = useState('')
   const confirm = useConfirm()
 
@@ -91,10 +92,10 @@ export function BrainView() {
         </div>
 
         <div className="brain-tabs">
-          {(['memories', 'tidy', 'connect'] as const).map((t) => (
+          {(['memories', 'graph', 'tidy', 'connect'] as const).map((t) => (
             <button key={t} className={'brain-tab' + (tab === t ? ' active' : '')} onClick={() => setTab(t)}>
-              {t === 'memories' ? <Brain size={13} /> : t === 'tidy' ? <Sparkles size={13} /> : <PlugZap size={13} />}
-              {t === 'memories' ? `Memories${newOnes.length ? ` · ${newOnes.length} new` : ''}` : t === 'tidy' ? 'Tidy' : 'Connect'}
+              {t === 'memories' ? <Brain size={13} /> : t === 'graph' ? <Network size={13} /> : t === 'tidy' ? <Sparkles size={13} /> : <PlugZap size={13} />}
+              {t === 'memories' ? `Memories${newOnes.length ? ` · ${newOnes.length} new` : ''}` : t === 'graph' ? 'Graph' : t === 'tidy' ? 'Tidy' : 'Connect'}
             </button>
           ))}
         </div>
@@ -168,10 +169,83 @@ export function BrainView() {
           </div>
         )}
 
+        {tab === 'graph' && <NeuralPanel memories={memories} />}
         {tab === 'tidy' && <TidyPanel folder={folder} memories={memories} onChange={load} />}
         {tab === 'connect' && <ConnectPanel />}
       </section>
       {confirm.element}
+    </div>
+  )
+}
+
+/** Every memory as a neuron in a brain-shaped network; related memories are wired together. */
+function NeuralPanel({ memories }: { memories: Memory[] }) {
+  const { openNote, fail } = useApp()
+  const canvas = useRef<HTMLCanvasElement>(null)
+  const net = useRef<NeuralHandle | null>(null)
+  const [query, setQuery] = useState('')
+  const [count, setCount] = useState<number | null>(null)
+  const [surface, setSurface] = useState(true)
+  const surfaceRef = useRef(surface)
+  useEffect(() => {
+    surfaceRef.current = surface
+    net.current?.setSurface(surface)
+  }, [surface])
+  const queryRef = useRef(query)
+  useEffect(() => {
+    queryRef.current = query
+  }, [query])
+  // Rebuild when the memories change (new, edited, forgotten).
+  const key = memories.map((m) => m.id + m.updatedAt + m.recallCount).join()
+  useEffect(() => {
+    let off = false
+    api
+      .brainGraph()
+      .then((g) => {
+        if (off || !canvas.current) return
+        net.current?.destroy()
+        net.current = createNeural(canvas.current, g, openNote)
+        net.current.setQuery(queryRef.current)
+        net.current.setSurface(surfaceRef.current)
+        setCount(g.nodes.length)
+      })
+      .catch(fail)
+    return () => {
+      off = true
+    }
+  }, [key, openNote, fail])
+  useEffect(() => () => net.current?.destroy(), [])
+  useEffect(() => net.current?.setQuery(query), [query])
+  const kinds = (['decision', 'gotcha', 'howto', 'preference', 'fact', 'context'] as MemoryKind[]).filter((k) => memories.some((m) => m.kind === k))
+  return (
+    <div className="neural-wrap">
+      <canvas ref={canvas} className="graph-canvas" />
+      <div className="space-hud top">
+        <div className="space-search">
+          <Search size={13} />
+          <input placeholder="Find a memory…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        </div>
+        <label className="space-toggle" title="The brain's surface: tiny 3D points that turn with it">
+          <input type="checkbox" checked={surface} onChange={(e) => setSurface(e.target.checked)} /> Surface
+        </label>
+        <button className="space-chip" onClick={() => net.current?.fit()} title="Back to the starting view">
+          <Scan size={13} /> Reset view
+        </button>
+        <span className="space-count">{count ?? '…'} neurons · drag or scroll to turn, Ctrl + scroll to zoom</span>
+      </div>
+      <div className="space-hud bottom neural-legend">
+        {kinds.map((k) => (
+          <span key={k} className="space-chip">
+            <span className="neural-dot" style={{ background: `hsl(${KIND_HUE[k][0]} ${KIND_HUE[k][1]}% ${KIND_HUE[k][2]}%)` }} /> {KIND_LABEL[k]}
+          </span>
+        ))}
+      </div>
+      {count === 0 && (
+        <div className="space-empty">
+          <b>No neurons yet</b>
+          <span>Every memory your AI tools save becomes a neuron here, wired to the memories it relates to.</span>
+        </div>
+      )}
     </div>
   )
 }
@@ -297,6 +371,56 @@ function CopyBlock({ label, text }: { label: string; text: string }) {
   )
 }
 
+const SKILL_TOOL = { claude: 'Claude Code', codex: 'Codex' } as const
+
+/** The astralis-brain skill: a playbook that teaches agents to use the Brain well. */
+function SkillSection() {
+  const { fail, toast } = useApp()
+  const [status, setStatus] = useState<SkillStatus[] | null>(null)
+  const load = useCallback(() => void api.brainSkillStatus().then(setStatus).catch(fail), [fail])
+  useEffect(() => load(), [load])
+  return (
+    <div className="brain-copy brain-skill">
+      <div className="brain-copy-head">
+        <span className="small">
+          <Sparkles size={12} /> Skill — teaches your AI how to use the Brain well
+        </span>
+        <button className="btn ghost sm" onClick={() => api.brainSkillText().then((t) => navigator.clipboard?.writeText(t)).then(() => toast('Skill copied'))}>
+          <Copy size={12} /> Copy
+        </button>
+      </div>
+      <div className="brain-skill-body">
+        <p className="small muted" style={{ margin: '0 0 10px' }}>
+          When to check the Brain, how to search it, what's worth saving and how to phrase it, keeping it true, and leaving a note when work is
+          unfinished. Your AI loads it whenever a task calls for it.
+        </p>
+        {status?.map((s) => (
+          <div key={s.target} className="row" style={{ marginBottom: 6 }}>
+            <span className="grow small">
+              <b>{SKILL_TOOL[s.target]}</b>{' '}
+              <span className="faint">
+                {s.state === 'installed' ? '· installed' : s.state === 'outdated' ? '· an older version is installed' : '· not installed'}
+              </span>
+            </span>
+            <button
+              className={'btn sm' + (s.state === 'installed' ? '' : ' primary')}
+              disabled={s.state === 'installed'}
+              onClick={() =>
+                api
+                  .brainInstallSkill(s.target)
+                  .then((p) => (toast(`Installed for ${SKILL_TOOL[s.target]}: ${p}`), load()))
+                  .catch(fail)
+              }
+            >
+              {s.state === 'installed' ? <><Check size={13} /> Installed</> : s.state === 'outdated' ? 'Update' : 'Install'}
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function ConnectPanel() {
   const { fail, toast } = useApp()
   const [setup, setSetup] = useState<BrainSetup | null>(null)
@@ -321,7 +445,8 @@ function ConnectPanel() {
       <CopyBlock label="Claude Code — run once in a terminal" text={`claude mcp add --scope user astralis-brain -- ${cmd.map(quote).join(' ')}`} />
       <CopyBlock label="Codex — add to ~/.codex/config.toml" text={toml} />
       <CopyBlock label="Cursor (~/.cursor/mcp.json) · Claude Desktop · other MCP apps" text={json} />
-      <CopyBlock label="Optional — add to your project's CLAUDE.md or AGENTS.md" text={hint} />
+      <SkillSection />
+      <CopyBlock label="Without the skill — add this to your project's CLAUDE.md or AGENTS.md instead" text={hint} />
 
       <div className="brain-group" style={{ marginTop: 18 }}>
         <div className="brain-group-title">Markdown mirror</div>
