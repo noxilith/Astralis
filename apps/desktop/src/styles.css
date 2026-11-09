@@ -530,6 +530,9 @@ a { color: var(--accent-strong); }
 .tree-row:hover { background: var(--bg-hover); }
 .tree-row.active { background: var(--accent-soft); }
 .tree-row.drop { background: var(--accent-soft); outline: 1px dashed var(--accent); }
+/* Dragging a note or folder: a label follows the pointer. */
+.tree-ghost { position: fixed; z-index: 1000; pointer-events: none; display: inline-flex; align-items: center; gap: 6px; max-width: 260px; padding: 4px 10px; border-radius: 7px; background: var(--bg-elev); border: 1px solid var(--accent); box-shadow: var(--shadow); font-size: 12.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+body.tree-dragging, body.tree-dragging * { cursor: grabbing !important; user-select: none !important; }
 .tree-caret { display: inline-flex; color: var(--text-faint); width: 13px; flex-shrink: 0; }
 .tree-icon { display: inline-flex; color: var(--text-muted); flex-shrink: 0; }
 .tree-icon.folder { color: var(--accent); }
@@ -566,6 +569,9 @@ a { color: var(--accent-strong); }
 .rail-btn.active { background: var(--accent-soft); color: var(--accent-strong); }
 .rail-badge { position: absolute; top: 2px; right: 1px; min-width: 14px; height: 14px; padding: 0 3px; border-radius: 7px; background: var(--accent); color: #fff; font-size: 9px; font-weight: 700; line-height: 14px; }
 .split-editor { grid-template-columns: minmax(0, 1fr) clamp(320px, 28vw, 420px); }
+
+.drive-access { display: flex; flex-direction: column; gap: 8px; padding: 12px; margin-bottom: 12px; border: 1px solid color-mix(in srgb, var(--warning) 50%, var(--border)); border-radius: 10px; background: color-mix(in srgb, var(--warning) 8%, var(--bg-elev)); }
+.drive-access p { margin: 0; line-height: 1.5; }
 
 /* ---------- Updates ---------- */
 .updates { display: flex; flex-direction: column; gap: 14px; max-width: 560px; }

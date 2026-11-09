@@ -367,6 +367,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         crate::cloud::cloud_invite,
         crate::cloud::cloud_uninvite,
         crate::cloud::cloud_join,
+        crate::cloud::cloud_grant_folder,
         crate::cloud::cloud_sync_now,
         crate::cloud::open_url,
         crate::assistant_cmds::assistant_status,

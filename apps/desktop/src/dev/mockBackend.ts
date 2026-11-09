@@ -26,6 +26,7 @@ let assistantReady = false
 const mockMe = { name: "noxilith", color: "#8b7bff" }
 const google: { clientId: string | null; email: string | null } = { clientId: null, email: null }
 const invites = new Map<string, { email: string; acceptedBy: string | null }[]>()
+const granted = new Set<string>()
 const mem = (folder: string, project: string, kind: string, hook: string, source: string, isNew: boolean, recallCount = 0, daysAgo = 1) => ({
   id: id(), short: Math.random().toString(16).slice(2, 8), folder, project, kind, hook, content: '', source, new: isNew, pinned: false,
   updatedAt: now() - daysAgo * 86400000, recalledAt: recallCount ? now() - 3600000 : null, recallCount,
@@ -267,7 +268,11 @@ const handlers: Record<string, (a: Args) => unknown> = {
     return v
   },
   cloud_invites: ({ vaultId }) => invites.get(vaultId) ?? [],
-  cloud_invite: ({ vaultId, email }) => void invites.set(vaultId, [...(invites.get(vaultId) ?? []), { email, acceptedBy: null }]),
+  cloud_invite: ({ vaultId, email }) => {
+    if (email.includes('third') && !granted.has(vaultId)) throw 'invalid input: needs-folder-access: Google needs you to give Astralis access to this vault\'s folder once.'
+    invites.set(vaultId, [...(invites.get(vaultId) ?? []), { email, acceptedBy: null }])
+  },
+  cloud_grant_folder: ({ vaultId }) => void granted.add(vaultId),
   cloud_uninvite: ({ vaultId, email }) => void invites.set(vaultId, (invites.get(vaultId) ?? []).filter((i: { email: string }) => i.email !== email)),
   cloud_join: () => 'Shared vault',
   cloud_sync_now: () => undefined,

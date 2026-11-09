@@ -280,6 +280,8 @@ export const api = {
   cloudUninvite: (vaultId: Id, email: string) => call<void>('cloud_uninvite', { vaultId, email }),
   /** Opens the Google Picker to choose a shared vault folder; returns the vault's name. */
   cloudJoin: () => call<string>('cloud_join'),
+  /** The owner picks the vault's folder in the Google Picker once, so its sharing can change. */
+  cloudGrantFolder: (vaultId: Id) => call<void>('cloud_grant_folder', { vaultId }),
   cloudSyncNow: () => call<void>('cloud_sync_now'),
   openUrl: (url: string) => call<void>('open_url', { url }),
   updateCheck: () => call<UpdateInfo>('update_check'),

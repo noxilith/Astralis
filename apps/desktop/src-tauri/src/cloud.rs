@@ -172,19 +172,45 @@ pub fn cloud_invites(state: S<'_>, vault_id: Uuid) -> Result<Vec<CloudInvite>> {
     state.store.lock().unwrap().cloud_invites(vault_id)
 }
 
+/// Starts the error the app recognizes: the owner has to pick the vault's folder once in the
+/// Google Picker (see `astralis_cloud::needs_folder_access`), then `cloud_grant_folder`.
+const NEEDS_FOLDER_ACCESS: &str = "needs-folder-access";
+
+fn sharing_err(e: anyhow::Error) -> Error {
+    if astralis_cloud::needs_folder_access(&e) {
+        Error::Invalid(format!(
+            "{NEEDS_FOLDER_ACCESS}: Google needs you to give Astralis access to this vault's folder once, because the people in it have added files to it."
+        ))
+    } else {
+        err(e)
+    }
+}
+
 /// Invites someone by Google email (shares the drive folder; Google emails them).
 #[tauri::command]
 pub async fn cloud_invite(state: S<'_>, vault_id: Uuid, email: String) -> Result<()> {
     let (_, from) = me(&state)?;
     let d = drive(&state).await?;
-    astralis_cloud::invite(&d, &state.store, vault_id, &email, &from).await.map_err(err)
+    astralis_cloud::invite(&d, &state.store, vault_id, &email, &from).await.map_err(sharing_err)
+}
+
+/// The owner picks the vault's folder in the Google Picker, which lets Astralis reach every file
+/// in it (the members' too, now and later). Needed once per vault before its sharing can change.
+#[tauri::command]
+pub async fn cloud_grant_folder(state: S<'_>, vault_id: Uuid) -> Result<()> {
+    let folder = astralis_cloud::owned_folder(&state.store, vault_id).map_err(err)?;
+    let (picked, _) = sign_in(state.inner(), true).await?;
+    if !picked.iter().any(|p| *p == folder) {
+        return Err(Error::Invalid("that wasn't this vault's folder; pick it inside the Astralis folder in your Google Drive".into()));
+    }
+    Ok(())
 }
 
 /// Takes someone out of a cloud vault (Drive access and, if they joined, their copy).
 #[tauri::command]
 pub async fn cloud_uninvite(state: S<'_>, vault_id: Uuid, email: String) -> Result<()> {
     let d = drive(&state).await?;
-    let device = astralis_cloud::uninvite(&d, &state.store, vault_id, &email).await.map_err(err)?;
+    let device = astralis_cloud::uninvite(&d, &state.store, vault_id, &email).await.map_err(sharing_err)?;
     if let (Some(device), Some(net)) = (device, state.net.get()) {
         net.shares_changed(&device);
     }

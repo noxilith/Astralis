@@ -1,4 +1,4 @@
-import { useMemo, useState, type DragEvent, type MouseEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from 'react'
 import { Archive, ChevronDown, ChevronRight, Copy, CornerLeftUp, ExternalLink, Folder as FolderIcon, FolderOpen, FolderPlus, MoreHorizontal, Pencil, PenTool, Pin, PinOff, StickyNote, Trash2 } from 'lucide-react'
 import type { Folder, Id, Note } from '../api'
 import { useCollab, type Presence } from '../lib/collab'
@@ -6,7 +6,11 @@ import { useCollab, type Presence } from '../lib/collab'
 export const noteIcon = (n: Note, size = 14) =>
   n.kind === 'whiteboard' ? <PenTool size={size} /> : <StickyNote size={size} />
 
-type Drag = { type: 'note' | 'folder'; id: Id }
+type Drag = { type: 'note' | 'folder'; id: Id; label: string; whiteboard?: boolean }
+/** Where a drop lands: a folder, the top level, or the Pinned section. */
+type Target = Id | 'root' | 'pinned'
+/** How far the pointer moves before a press becomes a drag (a shorter move is still a click). */
+const DRAG_START = 5
 
 /** What the right-click menu on a note can do. */
 export type NoteAction = 'open' | 'rename' | 'pin' | 'duplicate' | 'toTop' | 'archive' | 'delete'
@@ -60,10 +64,13 @@ function EditingDots({ people, inside }: { people?: Presence[]; inside?: boolean
 const byNote = (a: Note, b: Note) =>
   (a.title || 'Untitled').localeCompare(b.title || 'Untitled', undefined, { sensitivity: 'base' })
 
-/** Compact, file-explorer style tree of folders and notes. Drag rows onto folders to move them. */
+/** Compact, file-explorer style tree of folders and notes. Drag rows onto folders to move them.
+ *  Dragging is done with pointer events rather than HTML drag-and-drop, which is unreliable in
+ *  some webviews (WebKitGTK on Linux). */
 export function NoteTree(p: NoteTreeProps) {
   const [drag, setDrag] = useState<Drag | null>(null)
-  const [dropTarget, setDropTarget] = useState<Id | "root" | "pinned" | null>(null)
+  const [dropTarget, setDropTarget] = useState<Target | null>(null)
+  const [ghost, setGhost] = useState<{ x: number; y: number } | null>(null)
   const [menu, setMenu] = useState<{ folder: Folder; x: number; y: number } | null>(null)
   const [noteMenu, setNoteMenu] = useState<{ note: Note; x: number; y: number } | null>(null)
   const noteAction = (a: NoteAction) => {
@@ -111,31 +118,81 @@ export function NoteTree(p: NoteTreeProps) {
     return byId
   }, [presence, p.notes, p.folders])
 
-  const startDrag = (e: DragEvent, d: Drag) => {
-    e.dataTransfer.setData('text/plain', d.id)
-    e.dataTransfer.effectAllowed = 'move'
-    setDrag(d)
+  // Latest props for the window listeners below.
+  const props = useRef(p)
+  props.current = p
+  /** Pressed but not moved far enough yet / being dragged. */
+  const pressed = useRef<{ d: Drag; x: number; y: number } | null>(null)
+  const dragging = useRef<Drag | null>(null)
+  /** Swallows the click that ends a drag, so dropping doesn't also open the row. */
+  const justDropped = useRef(false)
+
+  /** True when folder `id` is `ancestor` or inside it (a folder can't move into itself). */
+  const within = (id: Id, ancestor: Id) => {
+    const parentOf = new Map(props.current.folders.map((f) => [f.id, f.parentId]))
+    for (let f: Id | null | undefined = id, n = 0; f && n < 1000; f = parentOf.get(f), n++) if (f === ancestor) return true
+    return false
   }
-  const endDrag = () => {
+  const targetAt = (x: number, y: number, d: Drag): Target | null => {
+    const el = document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-drop]')
+    const t = el?.dataset.drop
+    if (!t) return null
+    if (t === 'pinned') return d.type === 'note' ? 'pinned' : null
+    if (d.type === 'folder' && t !== 'root' && within(t, d.id)) return null
+    return t
+  }
+  const finish = (x: number | null, y: number | null) => {
+    const d = dragging.current
+    pressed.current = null
+    dragging.current = null
     setDrag(null)
     setDropTarget(null)
+    setGhost(null)
+    document.body.classList.remove('tree-dragging')
+    if (!d || x === null || y === null) return
+    justDropped.current = true
+    setTimeout(() => (justDropped.current = false), 0)
+    const t = targetAt(x, y, d)
+    if (!t) return
+    const p = props.current
+    if (t === 'pinned') p.onPinNote?.(d.id)
+    else if (d.type === 'note') p.onMoveNote(d.id, t === 'root' ? null : t)
+    else p.onMoveFolder(d.id, t === 'root' ? null : t)
   }
-  const drop = (e: DragEvent, folderId: Id | null) => {
-    e.preventDefault()
-    e.stopPropagation()
-    if (drag?.type === 'note') p.onMoveNote(drag.id, folderId)
-    else if (drag?.type === 'folder' && drag.id !== folderId) p.onMoveFolder(drag.id, folderId)
-    endDrag()
+  useEffect(() => {
+    const move = (e: globalThis.PointerEvent) => {
+      const start = pressed.current
+      if (!start) return
+      if (!dragging.current) {
+        if (Math.hypot(e.clientX - start.x, e.clientY - start.y) < DRAG_START) return
+        dragging.current = start.d
+        setDrag(start.d)
+        document.body.classList.add('tree-dragging')
+      }
+      setGhost({ x: e.clientX, y: e.clientY })
+      setDropTarget(targetAt(e.clientX, e.clientY, dragging.current))
+    }
+    const up = (e: globalThis.PointerEvent) => {
+      if (pressed.current) finish(dragging.current ? e.clientX : null, dragging.current ? e.clientY : null)
+    }
+    const key = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && dragging.current) finish(null, null)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('keydown', key)
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('keydown', key)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  /** Press-and-move on a row starts dragging it. */
+  const dragFrom = (d: Drag) => (e: PointerEvent) => {
+    if (e.button !== 0) return
+    pressed.current = { d, x: e.clientX, y: e.clientY }
   }
-  const dropProps = (target: Id | 'root') => ({
-    onDragOver: (e: DragEvent) => {
-      if (!drag) return
-      e.preventDefault()
-      e.stopPropagation()
-      setDropTarget(target)
-    },
-    onDrop: (e: DragEvent) => drop(e, target === 'root' ? null : target),
-  })
 
   const openMenu = (e: MouseEvent, folder: Folder) => {
     e.preventDefault()
@@ -151,11 +208,10 @@ export function NoteTree(p: NoteTreeProps) {
         <div
           className={'tree-row' + (dropTarget === f.id ? ' drop' : '') + (p.activeFolderId === f.id && !p.selectedId ? ' active' : '')}
           style={{ paddingLeft: 6 + depth * 14 }}
-          draggable
-          onDragStart={(e) => startDrag(e, { type: 'folder', id: f.id })}
-          onDragEnd={endDrag}
-          {...dropProps(f.id)}
+          data-drop={f.id}
+          onPointerDown={dragFrom({ type: 'folder', id: f.id, label: f.name })}
           onClick={() => {
+            if (justDropped.current) return
             p.onToggle(f.id)
             p.onSelectFolder(f)
           }}
@@ -179,10 +235,11 @@ export function NoteTree(p: NoteTreeProps) {
       key={keyPrefix + n.id}
       className={'tree-row' + (n.id === p.selectedId ? ' active' : '')}
       style={{ paddingLeft: 6 + depth * 14 + 17 }}
-      draggable
-      onDragStart={(e) => startDrag(e, { type: 'note', id: n.id })}
-      onDragEnd={endDrag}
-      onClick={() => p.onSelectNote(n)}
+      data-drop={keyPrefix ? undefined : (n.folderId ?? 'root')}
+      onPointerDown={dragFrom({ type: 'note', id: n.id, label: n.title || 'Untitled', whiteboard: n.kind === 'whiteboard' })}
+      onClick={() => {
+        if (!justDropped.current) p.onSelectNote(n)
+      }}
       onContextMenu={(e) => {
         if (!p.onNoteAction) return
         e.preventDefault()
@@ -209,19 +266,8 @@ export function NoteTree(p: NoteTreeProps) {
         <div
           className={'tree-row tree-section' + (dropTarget === 'pinned' ? ' drop' : '')}
           style={{ paddingLeft: 6 }}
+          data-drop="pinned"
           onClick={() => p.onToggle(PINNED_CLOSED)}
-          onDragOver={(e) => {
-            if (drag?.type !== 'note') return
-            e.preventDefault()
-            e.stopPropagation()
-            setDropTarget('pinned')
-          }}
-          onDrop={(e) => {
-            e.preventDefault()
-            e.stopPropagation()
-            if (drag?.type === 'note') p.onPinNote?.(drag.id)
-            endDrag()
-          }}
           title={pinned.length ? undefined : 'Drop a note here to pin it'}
         >
           <span className="tree-caret">{open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</span>
@@ -242,10 +288,16 @@ export function NoteTree(p: NoteTreeProps) {
   )
 
   return (
-    <div className={'tree' + (dropTarget === 'root' ? ' drop-root' : '')} {...dropProps('root')}>
+    <div className={'tree' + (dropTarget === 'root' ? ' drop-root' : '')} data-drop="root">
       {renderPinned()}
       {renderChildren(null, 0)}
       {drag && <div className="tree-root-hint">Drop here to move to the top level</div>}
+      {drag && ghost && (
+        <div className="tree-ghost" style={{ left: ghost.x + 12, top: ghost.y + 10 }}>
+          <span className="tree-icon">{drag.type === 'folder' ? <FolderIcon size={13} /> : drag.whiteboard ? <PenTool size={13} /> : <StickyNote size={13} />}</span>
+          {drag.label}
+        </div>
+      )}
       {noteMenu && (
         <>
           <div className="menu-backdrop" onClick={() => setNoteMenu(null)} onContextMenu={(e) => (e.preventDefault(), setNoteMenu(null))} />
