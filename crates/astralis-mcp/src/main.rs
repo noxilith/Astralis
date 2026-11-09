@@ -11,6 +11,7 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use astralis_core::Store;
+use astralis_core::agent_notes::{AgentAccess, NoteEdit};
 use astralis_core::memory::{MapEntry, MemoryKind, file_mtime};
 use serde_json::{Value, json};
 
@@ -21,7 +22,8 @@ const INSTRUCTIONS: &str = "Astralis Brain is this project's long-term memory (s
 2. Before re-reading files, grepping, or asking the user something you may have learned before, try brain_recall (by meaning) or brain_map (which file does what). Read a memory in full with brain_read only if the trimmed lines aren't enough.
 3. When you learn something durable, save it with brain_remember: one idea per memory, a one-line hook that says the point, details only if needed. Good: decisions and why, gotchas, build/test commands, user preferences (scope \"me\" if they apply to every project), where things live. Don't save secrets, or anything obvious from the code or git history.
 4. When you work out what files do, record them with brain_map_note (path + one-line purpose). brain_map flags files changed since — re-read only those.
-5. If a memory turns out wrong or outdated, brain_update or brain_forget it.";
+5. If a memory turns out wrong or outdated, brain_update or brain_forget it.
+The user's own notes (their notes app) are there too, only when they ask for something about them: notes_search or notes_list to find a note, notes_read to read it, then notes_edit (prefer a small old_text/new_text replacement over rewriting the whole body), notes_create, notes_move, notes_delete, and the notes_folder_* tools. Every edit keeps the note's history, and deleting archives a note (the user can restore it) unless you delete an already-archived note with permanent.";
 
 fn data_dir() -> PathBuf {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default();
@@ -87,6 +89,8 @@ fn error_result(text: impl Into<String>) -> Value {
 
 fn tools() -> Value {
     let project = json!({ "type": "string", "description": "Path of the project (defaults to the current repository)." });
+    let vault = json!({ "type": "string", "description": "Vault name (default: the user's default vault). See notes_vaults." });
+    let note = json!({ "type": "string", "description": "The note's [handle] (from notes_search/notes_list) or exact title." });
     json!([
         {
             "name": "brain_context",
@@ -152,6 +156,104 @@ fn tools() -> Value {
                 }, "required": ["path", "purpose"] } },
                 "project": project
             }, "required": ["files"] }
+        },
+        {
+            "name": "notes_vaults",
+            "description": "The user's note vaults (workspaces) you can use, with note counts. Encrypted vaults are never available.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "notes_search",
+            "description": "Search the user's notes by words; returns [handle] Title — vault/folder: snippet. Searches every vault unless one is named.",
+            "inputSchema": { "type": "object", "properties": {
+                "query": { "type": "string" },
+                "vault": vault,
+                "limit": { "type": "integer", "minimum": 1, "maximum": 30, "description": "Max results (default 8)." }
+            }, "required": ["query"] }
+        },
+        {
+            "name": "notes_list",
+            "description": "List the notes in a vault ([handle] Title — folder), optionally only one folder or tag.",
+            "inputSchema": { "type": "object", "properties": {
+                "vault": vault,
+                "folder": { "type": "string", "description": "Folder path like \"Work/Projects\" or a folder name." },
+                "tag": { "type": "string" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 300, "description": "Max notes (default 60)." }
+            } }
+        },
+        {
+            "name": "notes_read",
+            "description": "A note in full (Markdown), by [handle] or exact title.",
+            "inputSchema": { "type": "object", "properties": { "note": note }, "required": ["note"] }
+        },
+        {
+            "name": "notes_create",
+            "description": "Create a note (Markdown). The folder is created if it doesn't exist.",
+            "inputSchema": { "type": "object", "properties": {
+                "title": { "type": "string" },
+                "body": { "type": "string", "description": "The note's text, in Markdown." },
+                "vault": vault,
+                "folder": { "type": "string", "description": "Folder path like \"Work/Projects\" (optional)." },
+                "tags": { "type": "array", "items": { "type": "string" } }
+            }, "required": ["title", "body"] }
+        },
+        {
+            "name": "notes_edit",
+            "description": "Change a note. For the text, use ONE of: old_text + new_text (replace an exact passage — preferred, cheapest), append (add to the end), or body (rewrite the whole text). title and tags can be changed alongside. The previous version stays in the note's history.",
+            "inputSchema": { "type": "object", "properties": {
+                "note": note,
+                "old_text": { "type": "string", "description": "Exact text to replace (as notes_read shows it). Must appear once, unless replace_all." },
+                "new_text": { "type": "string" },
+                "replace_all": { "type": "boolean" },
+                "append": { "type": "string" },
+                "body": { "type": "string" },
+                "title": { "type": "string" },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "The note's full set of tags." }
+            }, "required": ["note"] }
+        },
+        {
+            "name": "notes_delete",
+            "description": "Delete a note. It goes to the archive, where the user can restore it. To remove it for good, delete it again with permanent: true (only works on archived notes; only when the user asked for that).",
+            "inputSchema": { "type": "object", "properties": {
+                "note": note,
+                "permanent": { "type": "boolean", "description": "Remove an already-archived note for good. It can't be restored." }
+            }, "required": ["note"] }
+        },
+        {
+            "name": "notes_move",
+            "description": "Move a note OR a folder (with everything in it): into a folder, out to the top level (to_folder \"/\"), and/or to another vault (to_vault). Missing folders are created. Images go along.",
+            "inputSchema": { "type": "object", "properties": {
+                "note": { "type": "string", "description": "The note to move ([handle] or title)." },
+                "folder": { "type": "string", "description": "Or the folder to move (path or name), in 'vault'." },
+                "vault": vault,
+                "to_folder": { "type": "string", "description": "Destination folder path; \"/\" for the top level." },
+                "to_vault": { "type": "string", "description": "Destination vault, if it's another one." }
+            } }
+        },
+        {
+            "name": "notes_folders",
+            "description": "A vault's folders as a tree, with note counts.",
+            "inputSchema": { "type": "object", "properties": { "vault": vault } }
+        },
+        {
+            "name": "notes_folder_create",
+            "description": "Create a folder; a path like \"Work/Projects\" makes the missing folders along the way.",
+            "inputSchema": { "type": "object", "properties": { "path": { "type": "string" }, "vault": vault }, "required": ["path"] }
+        },
+        {
+            "name": "notes_folder_rename",
+            "description": "Rename a folder (path or name).",
+            "inputSchema": { "type": "object", "properties": { "folder": { "type": "string" }, "name": { "type": "string" }, "vault": vault }, "required": ["folder", "name"] }
+        },
+        {
+            "name": "notes_folder_delete",
+            "description": "Delete a folder. Nothing in it is lost: its notes and subfolders move up a level.",
+            "inputSchema": { "type": "object", "properties": { "folder": { "type": "string" }, "vault": vault }, "required": ["folder"] }
+        },
+        {
+            "name": "notes_restore",
+            "description": "Bring an archived note back.",
+            "inputSchema": { "type": "object", "properties": { "note": note }, "required": ["note"] }
         }
     ])
 }
@@ -230,6 +332,70 @@ impl Server {
                 self.after_write();
                 Ok(format!("Code map updated ({n} files)."))
             }
+            n if n.starts_with("notes_") => self.notes(n, args),
+            other => Err(format!("unknown tool {other}")),
+        }
+    }
+
+    /// The user's notes. Brain → Connect in the app decides what agents may do with them.
+    fn notes(&mut self, name: &str, args: &Value) -> Result<String, String> {
+        let s = |v: &Value| v.as_str().map(str::to_owned);
+        let err = |e: astralis_core::Error| e.to_string();
+        let access = self.store.agent_access().map_err(err)?;
+        let writes = !matches!(name, "notes_vaults" | "notes_search" | "notes_list" | "notes_read" | "notes_folders");
+        match access {
+            AgentAccess::Off => return Err("The user has turned off AI access to their notes (Astralis → Brain → Connect).".into()),
+            AgentAccess::Read if writes => return Err("The user lets AI agents read their notes but not change them (Astralis → Brain → Connect). Suggest the change to the user instead.".into()),
+            _ => {}
+        }
+        let note = || s(&args["note"]).ok_or("note is required (a [handle] or title)".to_string());
+        let tags = |v: &Value| v.as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_owned)).collect::<Vec<_>>());
+        match name {
+            "notes_vaults" => self.store.agent_vaults().map_err(err),
+            "notes_search" => {
+                let query = s(&args["query"]).ok_or("query is required")?;
+                let limit = args["limit"].as_u64().unwrap_or(8).clamp(1, 30) as usize;
+                self.store.agent_search(&query, s(&args["vault"]).as_deref(), limit).map_err(err)
+            }
+            "notes_list" => {
+                let limit = args["limit"].as_u64().unwrap_or(60).clamp(1, 300) as usize;
+                self.store.agent_list(s(&args["vault"]).as_deref(), s(&args["folder"]).as_deref(), s(&args["tag"]).as_deref(), limit).map_err(err)
+            }
+            "notes_read" => self.store.agent_read(&note()?).map_err(err),
+            "notes_create" => {
+                let title = s(&args["title"]).ok_or("title is required")?;
+                let body = s(&args["body"]).unwrap_or_default();
+                self.store
+                    .agent_create(&title, &body, s(&args["vault"]).as_deref(), s(&args["folder"]).as_deref(), &tags(&args["tags"]).unwrap_or_default())
+                    .map_err(err)
+            }
+            "notes_edit" => {
+                let replace = match (s(&args["old_text"]), s(&args["new_text"])) {
+                    (Some(old), Some(new)) => Some((old, new, args["replace_all"].as_bool().unwrap_or(false))),
+                    (Some(_), None) => return Err("old_text needs new_text (use \"\" to delete the passage)".into()),
+                    (None, Some(_)) => return Err("new_text needs old_text (or use append or body)".into()),
+                    (None, None) => None,
+                };
+                let edit = NoteEdit { title: s(&args["title"]), body: s(&args["body"]), append: s(&args["append"]), replace, tags: tags(&args["tags"]) };
+                self.store.agent_edit(&note()?, edit).map_err(err)
+            }
+            "notes_delete" | "notes_archive" => self.store.agent_delete(&note()?, args["permanent"].as_bool().unwrap_or(false)).map_err(err),
+            "notes_move" => {
+                let (to_folder, to_vault) = (s(&args["to_folder"]), s(&args["to_vault"]));
+                match (s(&args["note"]), s(&args["folder"])) {
+                    (Some(n), None) => self.store.agent_move_note(&n, to_folder.as_deref(), to_vault.as_deref()).map_err(err),
+                    (None, Some(f)) => self.store.agent_move_folder(&f, s(&args["vault"]).as_deref(), to_folder.as_deref(), to_vault.as_deref()).map_err(err),
+                    _ => Err("give either note or folder".into()),
+                }
+            }
+            "notes_folders" => self.store.agent_folders(s(&args["vault"]).as_deref()).map_err(err),
+            "notes_folder_create" => self.store.agent_folder_create(&s(&args["path"]).ok_or("path is required")?, s(&args["vault"]).as_deref()).map_err(err),
+            "notes_folder_rename" => self
+                .store
+                .agent_folder_rename(&s(&args["folder"]).ok_or("folder is required")?, &s(&args["name"]).ok_or("name is required")?, s(&args["vault"]).as_deref())
+                .map_err(err),
+            "notes_folder_delete" => self.store.agent_folder_delete(&s(&args["folder"]).ok_or("folder is required")?, s(&args["vault"]).as_deref()).map_err(err),
+            "notes_restore" => self.store.agent_restore(&note()?).map_err(err),
             other => Err(format!("unknown tool {other}")),
         }
     }

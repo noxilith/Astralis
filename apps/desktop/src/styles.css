@@ -573,6 +573,9 @@ body.tree-dragging, body.tree-dragging * { cursor: grabbing !important; user-sel
 .drive-access { display: flex; flex-direction: column; gap: 8px; padding: 12px; margin-bottom: 12px; border: 1px solid color-mix(in srgb, var(--warning) 50%, var(--border)); border-radius: 10px; background: color-mix(in srgb, var(--warning) 8%, var(--bg-elev)); }
 .drive-access p { margin: 0; line-height: 1.5; }
 
+.radio-row { display: flex; gap: 8px; align-items: baseline; padding: 4px 0; cursor: pointer; }
+.radio-row input { accent-color: var(--accent); }
+
 /* ---------- Updates ---------- */
 .updates { display: flex; flex-direction: column; gap: 14px; max-width: 560px; }
 .update-card { display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); border-radius: 12px; background: color-mix(in srgb, var(--accent) 7%, var(--bg-elev)); }

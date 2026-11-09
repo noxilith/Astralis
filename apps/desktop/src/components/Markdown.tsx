@@ -3,6 +3,7 @@ import { Marked, type Tokens } from 'marked'
 import DOMPurify from 'dompurify'
 import { ATTACHMENT_RE, attachmentUrl, splitAlt } from '../lib/attachments'
 import { highlightElement } from "../lib/highlight"
+import { SYNCED } from "../lib/collab"
 
 const escapeHtml = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -65,13 +66,31 @@ export function Markdown({
     })
   }, [html])
 
-  // Load vault images.
+  // Load vault images. Someone else's image can reach this device a moment after the note that
+  // shows it (the text streams live; the image comes with the next sync), so images that aren't
+  // here yet are tried again whenever a sync lands, and a few more times after that.
   useEffect(() => {
-    root.current?.querySelectorAll<HTMLImageElement>('img[data-attachment]').forEach((img) => {
-      attachmentUrl(img.dataset.attachment!)
-        .then((url) => (img.src = url))
-        .catch(() => img.closest('.md-img')?.classList.add('missing'))
-    })
+    let alive = true
+    const load = () =>
+      root.current?.querySelectorAll<HTMLImageElement>('img[data-attachment]').forEach((img) => {
+        if (img.dataset.loaded) return
+        attachmentUrl(img.dataset.attachment!)
+          .then((url) => {
+            if (!alive) return
+            img.src = url
+            img.dataset.loaded = '1'
+            img.closest('.md-img')?.classList.remove('missing')
+          })
+          .catch(() => img.closest('.md-img')?.classList.add('missing'))
+      })
+    load()
+    window.addEventListener(SYNCED, load)
+    const timers = [2000, 5000, 12000, 30000].map((ms) => setTimeout(load, ms))
+    return () => {
+      alive = false
+      window.removeEventListener(SYNCED, load)
+      timers.forEach(clearTimeout)
+    }
   }, [html])
 
   return (

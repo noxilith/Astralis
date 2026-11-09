@@ -1,7 +1,13 @@
 //! Syncing a cloud vault through its drive folder.
 //!
-//! Each device uploads its new changes as one sealed file (`<device>-<time>.astr`) and applies
-//! the files it hasn't seen yet. Files are sealed with the vault's sync key (XChaCha20-Poly1305,
+//! Each of the owner's devices uploads its new changes as one sealed file (`<device>-<time>.astr`)
+//! into the vault's folder, and every device applies the files it hasn't seen yet.
+//!
+//! Only the Google account that owns the folder uploads. Astralis has Google's drive.file
+//! permission, which only reaches files a person's own copy created: so files a member uploaded
+//! couldn't be read by anyone else, and they stop the owner from changing who the folder is shared
+//! with (Google refuses while the folder holds files the owner's app can't touch). Members sync
+//! with the people in the vault peer-to-peer instead, and remove any files they uploaded before. Files are sealed with the vault's sync key (XChaCha20-Poly1305,
 //! bound to the vault id), so the drive only ever holds ciphertext. Applying goes through the
 //! same scope checks as P2P: a file can only change this one vault.
 
@@ -82,7 +88,8 @@ fn merge(a: &mut VersionVector, b: &VersionVector) {
     }
 }
 
-/// One round for one cloud vault: apply what's new on the drive, then upload what's new here.
+/// One round for one cloud vault: apply what's new on the drive, then (the folder's owner) upload
+/// what's new here, or (a member) remove what it uploaded in earlier versions.
 pub async fn sync_vault<D: DriveFiles>(drive: &D, store: &StoreHandle, vault: Uuid) -> Result<SyncReport> {
     let Some(cv) = store.lock().unwrap().cloud_vault(vault).map_err(|e| anyhow!("{e}"))? else {
         return Ok(SyncReport::default());
@@ -118,6 +125,16 @@ pub async fn sync_vault<D: DriveFiles>(drive: &D, store: &StoreHandle, vault: Uu
             Err(e) => tracing::warn!("skipping {} on the drive: {e:#}", f.name),
         }
         s.mark_cloud_file_seen(vault, &f.id).map_err(|e| anyhow!("{e}"))?;
+    }
+
+    // A member doesn't upload, and takes back what it uploaded before (only its own files).
+    if !drive.owns(&cv.folder_id).await? {
+        for f in files.iter().filter(|f| f.mine && f.name.ends_with(EXT)) {
+            if let Err(e) = drive.delete(&f.id).await {
+                tracing::warn!("couldn't remove {} from the shared folder: {e:#}", f.name);
+            }
+        }
+        return Ok(report);
     }
 
     // Push.

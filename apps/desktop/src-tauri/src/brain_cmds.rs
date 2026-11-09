@@ -152,6 +152,42 @@ pub fn spawn_brain_watch(app: AppHandle, state: SharedState) {
     });
 }
 
+/// Notices notes changed by another process (AI agents through the Brain's MCP server) and tells
+/// the UI like a sync would, so the note list refreshes and an open note merges the change.
+/// (Peers get the changes on their own: P2P sync reads the database on every round.)
+pub fn spawn_outside_edits_watch(app: AppHandle, state: SharedState) {
+    tauri::async_runtime::spawn(async move {
+        let mut seen: Option<i64> = None;
+        let mut since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let Ok(version) = bg(&state, |s| s.data_version()).await else { continue };
+            if seen.is_some_and(|v| v != version) {
+                if let Ok((ids, newest)) = bg(&state, move |s| s.notes_changed_since(since)).await {
+                    since = newest;
+                    if !ids.is_empty() {
+                        let ids: Vec<String> = ids.into_iter().map(|i| i.to_string()).collect();
+                        let _ = app.emit("outside-edits", ids);
+                    }
+                }
+            }
+            seen = Some(version);
+        }
+    });
+}
+
+/// What AI agents may do with the user's notes: "edit", "read" or "off".
+#[tauri::command]
+pub async fn agents_notes_access(state: S<'_>) -> Result<String> {
+    bg(&state, |s| Ok(s.agent_access()?.as_str().to_string())).await
+}
+
+#[tauri::command]
+pub async fn agents_set_notes_access(state: S<'_>, access: String) -> Result<()> {
+    let a = astralis_core::agent_notes::AgentAccess::parse(&access).ok_or_else(|| Error::Invalid("access is edit, read or off".into()))?;
+    bg(&state, move |s| s.set_agent_access(a)).await
+}
+
 // ---- the astralis-brain skill (teaches agents to use the Brain well) ----
 
 const SKILL: &str = include_str!("../../../../skills/astralis-brain/SKILL.md");

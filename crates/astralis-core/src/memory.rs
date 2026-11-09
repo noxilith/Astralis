@@ -28,7 +28,7 @@ use crate::util::now_ms;
 
 pub const BRAIN_VAULT_NAME: &str = "Brain";
 pub const ME_FOLDER: &str = "Me";
-const VAULT_KEY: &str = "brain.vault";
+pub(crate) const VAULT_KEY: &str = "brain.vault";
 const PROJECTS_KEY: &str = "brain.projects";
 const STATS_KEY: &str = "brain.stats";
 const MIRROR_KEY: &str = "brain.mirror";

@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef } from 'react'
 import type { ExcalidrawImperativeAPI, Collaborator, SocketId } from '@excalidraw/excalidraw/types'
 import { api, p2p, type Note } from '../api'
 import { useApp } from '../context'
-import { REMOTE_SCENE, connectedCount, throttle, useCollab } from '../lib/collab'
+import { REMOTE_SCENE, SYNCED, connectedCount, throttle, useCollab } from '../lib/collab'
 import { Empty, Spinner, useDebounced } from './ui'
 import '@excalidraw/excalidraw/index.css'
 
@@ -52,6 +52,34 @@ export function WhiteboardEditor({ note, theme, readOnly }: { note: Note; theme:
   )
   useEffect(() => () => void p2p.livePresence(null, null, null, null).catch(() => {}), [note.id])
 
+  // Images in shapes that came in live: the shape streams right away, but the image itself is
+  // only in the saved board, which reaches this device with the next sync. Take any missing
+  // images from the saved board now, and again whenever a sync touches this whiteboard.
+  const loadMissingImages = async () => {
+    const a = apiRef.current
+    if (!a) return
+    const have = a.getFiles()
+    const missing = (a.getSceneElements() as unknown as { type: string; fileId?: string | null }[])
+      .filter((e) => e.type === 'image' && e.fileId && !have[e.fileId])
+      .map((e) => e.fileId!)
+    if (!missing.length) return
+    try {
+      const saved = JSON.parse((await api.getNote(note.id)).body || '{}').files ?? {}
+      const found = missing.map((id) => saved[id]).filter(Boolean)
+      if (found.length) a.addFiles(found)
+    } catch {
+      /* not synced yet; the next sync tries again */
+    }
+  }
+  useEffect(() => {
+    const onSynced = (e: Event) => {
+      if ((e as CustomEvent<string[]>).detail?.includes(note.id)) void loadMissingImages()
+    }
+    window.addEventListener(SYNCED, onSynced)
+    return () => window.removeEventListener(SYNCED, onSynced)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [note.id])
+
   // Drawing from collaborators.
   useEffect(() => {
     const onScene = (e: Event) => {
@@ -62,6 +90,7 @@ export function WhiteboardEditor({ note, theme, readOnly }: { note: Note; theme:
         const merged = mergeElements(a.getSceneElementsIncludingDeleted() as unknown as El[], JSON.parse(elements))
         lastRemote.current = signature(merged)
         a.updateScene({ elements: merged as never })
+        void loadMissingImages()
       } catch {
         /* ignore malformed scene */
       }

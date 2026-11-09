@@ -135,6 +135,7 @@ pub fn run() {
             spawn_brain_loop(app.handle().clone(), state.clone());
             cloud::spawn_sync_loop(app.handle().clone(), state.clone());
             brain_cmds::spawn_brain_watch(app.handle().clone(), state.clone());
+            brain_cmds::spawn_outside_edits_watch(app.handle().clone(), state.clone());
             spawn_p2p(app.handle().clone(), state, data_dir.join("device.key"));
             Ok(())
         })

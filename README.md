@@ -156,6 +156,9 @@ conventions, gotchas, a map of the code) plus a section about you.
 - **Brain → Connect** sets it up and installs the
   [`astralis-brain` skill](skills/astralis-brain/SKILL.md), which teaches the agent to use it
   well.
+- Agents can also **work with your notes** when you ask: search, read, write, edit, move and
+  delete notes, and organize folders, across your vaults (never encrypted ones). Every edit keeps the note's history, and you choose
+  in Brain → Connect whether agents may edit, only read, or not touch your notes.
 - Its graph is a rotatable 3D brain with each project in its own region.
 
 <br clear="right">
@@ -168,8 +171,10 @@ conventions, gotchas, a map of the code) plus a section about you.
   their own colour.
 - **Shared vaults**: share one vault with another device. It shows up as its own vault there,
   never touches their others, and disappears when you stop sharing.
-- **Google Drive**: keep a vault on your Drive and invite people by email. Everything on Drive
-  is end-to-end encrypted, and the app can only see the files it created. See
+- **Google Drive**: keep a vault on your Drive and invite people by email. Drive keeps your own
+  devices in sync, even when they're never online at the same time; the people you invite sync
+  with you peer-to-peer while you're both online. Everything on Drive is end-to-end encrypted, and
+  the app can only see the files it created. See
   [docs/google-drive-setup.md](docs/google-drive-setup.md) to build with your own Google client.
 
 Under the hood, changes carry hybrid logical clocks and apply in any order; note text merges

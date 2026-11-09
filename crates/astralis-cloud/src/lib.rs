@@ -122,18 +122,12 @@ pub async fn uninvite(drive: &GoogleDrive, store: &StoreHandle, vault: Uuid, ema
     store.lock().unwrap().remove_cloud_invite(vault, email).map_err(|e| anyhow!("{e}"))
 }
 
-/// Google refuses to change who a folder is shared with while this app can't touch some of the
-/// files inside it. With the drive.file permission, the app only reaches files it created or that
-/// were picked in the Google Picker, and the owner never picked their own vault folder: so once
-/// members have uploaded into it, inviting or removing someone fails until the owner picks the
-/// folder once (which grants the app its contents, current and future).
-pub fn needs_folder_access(e: &anyhow::Error) -> bool {
+/// Google refuses to change who a folder is shared with while it holds files this app can't touch.
+/// With the drive.file permission, the app only reaches files the owner's own copy created, so
+/// files a member uploaded (Astralis before 1.0.2 did) block inviting and removing people until
+/// that member's updated Astralis removes them (see `sync::sync_vault`).
+pub fn members_files_in_the_way(e: &anyhow::Error) -> bool {
     format!("{e:#}").contains("has not granted the app")
-}
-
-/// The drive folder of a vault this device owns.
-pub fn owned_folder(store: &StoreHandle, vault: Uuid) -> Result<String> {
-    Ok(owned_cloud_vault(store, vault)?.folder_id)
 }
 
 fn owned_cloud_vault(store: &StoreHandle, vault: Uuid) -> Result<CloudVault> {

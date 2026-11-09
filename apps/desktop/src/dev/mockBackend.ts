@@ -23,6 +23,7 @@ const templates: Template[] = [
 ]
 
 let assistantReady = false
+let agentsAccess = 'edit'
 const mockMe = { name: "noxilith", color: "#8b7bff" }
 const google: { clientId: string | null; email: string | null } = { clientId: null, email: null }
 const invites = new Map<string, { email: string; acceptedBy: string | null }[]>()
@@ -244,8 +245,9 @@ const handlers: Record<string, (a: Args) => unknown> = {
   related_notes: () => [],
   suggest_tags: () => [{ tag: 'example', score: 0.5, source: 'keyword' }],
   summarize_note: ({ id: k }) => ({ sentences: [], text: find(notes, k).body.split(/[.\n]/)[0] }),
-  add_attachment: ({ vaultId, name, mime, data }) => {
-    const id = crypto.randomUUID()
+  // `id` lets the preview pretend an image arrives from someone else (it's chosen by the app otherwise).
+  add_attachment: ({ vaultId, name, mime, data, id: given }) => {
+    const id = typeof given === 'string' ? given : crypto.randomUUID()
     images.set(id, { mime, data })
     const ext = mime.split('/')[1]?.replace('jpeg', 'jpg').replace('svg+xml', 'svg') ?? 'bin'
     return { id, vaultId: vaultOf(vaultId), name, mime, size: data.length, path: `attachments/${id}.${ext}`, createdAt: now() }
@@ -269,10 +271,12 @@ const handlers: Record<string, (a: Args) => unknown> = {
   },
   cloud_invites: ({ vaultId }) => invites.get(vaultId) ?? [],
   cloud_invite: ({ vaultId, email }) => {
-    if (email.includes('third') && !granted.has(vaultId)) throw 'invalid input: needs-folder-access: Google needs you to give Astralis access to this vault\'s folder once.'
+    if (email.includes('third') && !granted.has(vaultId)) {
+      granted.add(vaultId) // pretend everyone updates before the next try
+      throw 'invalid input: members-files-in-folder: someone in this vault still has files in its Drive folder from an older Astralis.'
+    }
     invites.set(vaultId, [...(invites.get(vaultId) ?? []), { email, acceptedBy: null }])
   },
-  cloud_grant_folder: ({ vaultId }) => void granted.add(vaultId),
   cloud_uninvite: ({ vaultId, email }) => void invites.set(vaultId, (invites.get(vaultId) ?? []).filter((i: { email: string }) => i.email !== email)),
   cloud_join: () => 'Shared vault',
   cloud_sync_now: () => undefined,
@@ -293,6 +297,8 @@ const handlers: Record<string, (a: Args) => unknown> = {
       : "# Starfield Farm\n\nA cozy farming game set on small planets, where gravity and day length change how crops grow.\n\n## Features\n- Planet-hopping farms with different gravity\n- Crops that adapt to each planet\n- Trading between colonies\n\n## Plan\n1. **Weeks 1–2:** prototype low-gravity crop growth\n2. **Weeks 3–6:** one planet, full farming loop\n3. **Weeks 7–10:** second planet + trading\n4. **Weeks 11–12:** polish, Steam page, demo\n\n**First step today:** sketch the crop-growth rules on paper.",
   assistant_cancel: () => undefined,
   assistant_unload: () => undefined,
+  agents_notes_access: () => agentsAccess,
+  agents_set_notes_access: ({ access }) => void (agentsAccess = access),
   // Updates (pretend: a newer release is out).
   update_check: () => ({ current: '1.0.0', latest: '1.1.0', canInstall: true, install: 'AppImage', notes: '## What’s new\n- Faster galaxy graph\n- Ask Astralis remembers chats\n- Fixes for shared vaults', page: 'https://github.com/noxilith/Astralis/releases/latest', size: 98_400_000 }),
   update_install: () => new Promise((_, reject) => setTimeout(() => reject(new Error('(Preview) Updating only works in the desktop app.')), 1500)),

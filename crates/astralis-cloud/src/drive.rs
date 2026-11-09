@@ -18,6 +18,8 @@ pub const ROOT_NAME: &str = "Astralis";
 pub struct RemoteFile {
     pub id: String,
     pub name: String,
+    /// This Google account owns it (it uploaded it).
+    pub mine: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -34,6 +36,10 @@ pub trait DriveFiles: Send + Sync {
     fn list(&self, folder: &str) -> impl Future<Output = Result<Vec<RemoteFile>>> + Send;
     fn download(&self, id: &str) -> impl Future<Output = Result<Vec<u8>>> + Send;
     fn upload(&self, folder: &str, name: &str, bytes: Vec<u8>) -> impl Future<Output = Result<String>> + Send;
+    /// The folder belongs to this Google account (rather than being shared with it).
+    fn owns(&self, folder: &str) -> impl Future<Output = Result<bool>> + Send;
+    /// Deletes a file for good (only works on this account's own files).
+    fn delete(&self, id: &str) -> impl Future<Output = Result<()>> + Send;
 }
 
 /// Google Drive with an access token (callers refresh it).
@@ -50,6 +56,8 @@ struct FileJson {
     name: String,
     #[serde(default)]
     app_properties: BTreeMap<String, String>,
+    #[serde(default)]
+    owned_by_me: bool,
 }
 
 #[derive(Deserialize)]
@@ -226,7 +234,7 @@ impl DriveFiles for GoogleDrive {
         loop {
             let mut query = vec![
                 ("q", q.clone()),
-                ("fields", "files(id,name),nextPageToken".into()),
+                ("fields", "files(id,name,ownedByMe),nextPageToken".into()),
                 ("pageSize", "1000".into()),
                 ("orderBy", "createdTime".into()),
                 ("supportsAllDrives", "true".into()),
@@ -237,7 +245,7 @@ impl DriveFiles for GoogleDrive {
             }
             let resp = self.http.get(format!("{API}/files")).query(&query).bearer_auth(&self.token).send().await?;
             let list: ListJson = Self::check(resp).await?.json().await?;
-            out.extend(list.files.into_iter().map(|f| RemoteFile { id: f.id, name: f.name }));
+            out.extend(list.files.into_iter().map(|f| RemoteFile { id: f.id, name: f.name, mine: f.owned_by_me }));
             match list.next_page_token {
                 Some(p) => page = Some(p),
                 None => break,
@@ -279,5 +287,23 @@ impl DriveFiles for GoogleDrive {
             .await?;
         let f: FileJson = Self::check(resp).await?.json().await?;
         Ok(f.id)
+    }
+
+    async fn owns(&self, folder: &str) -> Result<bool> {
+        let resp = self
+            .http
+            .get(format!("{API}/files/{folder}"))
+            .query(&[("fields", "ownedByMe"), ("supportsAllDrives", "true")])
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        let f: serde_json::Value = Self::check(resp).await?.json().await?;
+        Ok(f["ownedByMe"].as_bool().unwrap_or(false))
+    }
+
+    async fn delete(&self, id: &str) -> Result<()> {
+        let resp = self.http.delete(format!("{API}/files/{id}")).query(&[("supportsAllDrives", "true")]).bearer_auth(&self.token).send().await?;
+        Self::check(resp).await?;
+        Ok(())
     }
 }

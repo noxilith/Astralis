@@ -10,11 +10,23 @@ use crate::drive::{DriveFiles, RemoteFile};
 use crate::sync::{EXT, open_changes, seal_changes};
 
 /// An in-memory drive. `hidden` files exist but this account can't read them (like files
-/// another person's copy of the app made, under the drive.file scope).
+/// another person's copy of the app made, under the drive.file scope). `account` is who's
+/// signed in; folders belong to this account unless `folder_owner` says otherwise.
 #[derive(Default)]
 struct MemDrive {
-    files: Mutex<Vec<(String, String, String, Vec<u8>)>>, // id, folder, name, bytes
+    files: Mutex<Vec<(String, String, String, Vec<u8>, String)>>, // id, folder, name, bytes, owner
     hidden: Mutex<Vec<String>>,
+    account: Mutex<String>,
+    folder_owner: Mutex<std::collections::HashMap<String, String>>,
+}
+
+impl MemDrive {
+    fn sign_in(&self, account: &str) {
+        *self.account.lock().unwrap() = account.into();
+    }
+    fn names(&self) -> Vec<String> {
+        self.files.lock().unwrap().iter().map(|f| f.2.clone()).collect()
+    }
 }
 
 impl DriveFiles for MemDrive {
@@ -25,7 +37,7 @@ impl DriveFiles for MemDrive {
             .unwrap()
             .iter()
             .filter(|f| f.1 == folder)
-            .map(|f| RemoteFile { id: f.0.clone(), name: f.2.clone() })
+            .map(|f| RemoteFile { id: f.0.clone(), name: f.2.clone(), mine: f.4 == *self.account.lock().unwrap() })
             .collect())
     }
     async fn download(&self, id: &str) -> Result<Vec<u8>> {
@@ -36,8 +48,23 @@ impl DriveFiles for MemDrive {
     }
     async fn upload(&self, folder: &str, name: &str, bytes: Vec<u8>) -> Result<String> {
         let id = format!("f{}", self.files.lock().unwrap().len());
-        self.files.lock().unwrap().push((id.clone(), folder.into(), name.into(), bytes));
+        let owner = self.account.lock().unwrap().clone();
+        self.files.lock().unwrap().push((id.clone(), folder.into(), name.into(), bytes, owner));
         Ok(id)
+    }
+    async fn owns(&self, folder: &str) -> Result<bool> {
+        let me = self.account.lock().unwrap().clone();
+        Ok(self.folder_owner.lock().unwrap().get(folder).is_none_or(|o| *o == me))
+    }
+    async fn delete(&self, id: &str) -> Result<()> {
+        let me = self.account.lock().unwrap().clone();
+        let mut files = self.files.lock().unwrap();
+        let i = files.iter().position(|f| f.0 == id).ok_or_else(|| anyhow!("not found"))?;
+        if files[i].4 != me {
+            return Err(anyhow!("only the owner can delete it"));
+        }
+        files.remove(i);
+        Ok(())
     }
 }
 
@@ -145,6 +172,32 @@ async fn files_this_account_cant_read_are_retried_later() {
     drive.hidden.lock().unwrap().clear();
     assert_eq!(sync_vault(&drive, &b, v).await.unwrap().applied, 1);
     assert_eq!(titles(&b, v), vec!["Later"]);
+}
+
+#[tokio::test]
+async fn members_dont_upload_and_take_back_what_they_uploaded_before() {
+    let (a, b, v) = two_devices();
+    let drive = MemDrive::default();
+    drive.folder_owner.lock().unwrap().insert("folder".into(), "owner".into());
+    // An earlier version of Astralis on a member's computer put a file in the owner's folder.
+    drive.sign_in("member");
+    drive.upload("folder", &format!("old-member{EXT}"), b"sealed".to_vec()).await.unwrap();
+
+    // The owner uploads as before.
+    drive.sign_in("owner");
+    a.lock().unwrap().create_note(NewNote { title: "Plan".into(), vault_id: Some(v), ..Default::default() }).unwrap();
+    assert!(sync_vault(&drive, &a, v).await.unwrap().uploaded);
+
+    // The member catches up, then edits too, but uploads nothing and removes its old file (never
+    // the owner's).
+    drive.sign_in("member");
+    sync_vault(&drive, &b, v).await.unwrap();
+    b.lock().unwrap().create_note(NewNote { title: "Idea".into(), vault_id: Some(v), ..Default::default() }).unwrap();
+    assert!(!sync_vault(&drive, &b, v).await.unwrap().uploaded);
+    let names = drive.names();
+    assert!(!names.iter().any(|n| n.starts_with("old-member")), "the member's old file is gone");
+    assert_eq!(names.len(), 1, "only the owner's file is left: {names:?}");
+    assert!(drive.files.lock().unwrap().iter().all(|f| f.4 == "owner"));
 }
 
 #[test]

@@ -1974,3 +1974,26 @@ fn brain_graph_links_related_memories() {
     assert!(g.links.iter().any(|l| hook(l.a).contains("cargo") && hook(l.b).contains("cargo")), "{:?}", g.links);
     assert!(!g.links.iter().any(|l| hook(l.a).contains("Dark") || hook(l.b).contains("Dark")));
 }
+
+#[test]
+fn images_in_a_shared_vault_reach_everyone_in_it() {
+    let mut a = store();
+    let mut b = store();
+    let team = a.create_vault("Team", None).unwrap();
+    a.share_vault(team.id, "B").unwrap();
+    assert!(b.accept_shared_vault(team.id, "A").unwrap());
+    sync_shared(&a, "A", &b, "B");
+
+    // The owner adds an image to a note; the member gets the note and can open the image.
+    let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4];
+    let img = a.add_attachment(Some(team.id), "cat.png", "image/png", &png).unwrap();
+    note_in(&a, team.id, "Cat", &format!("![cat]({})", img.path));
+    sync_shared(&a, "A", &b, "B");
+    assert_eq!(b.get_attachment(img.id).unwrap().1, png);
+
+    // And the other way round.
+    let jpg = vec![0xff, 0xd8, 0xff, 9, 9, 9];
+    let back = b.add_attachment(Some(team.id), "dog.jpg", "image/jpeg", &jpg).unwrap();
+    sync_shared(&a, "A", &b, "B");
+    assert_eq!(a.get_attachment(back.id).unwrap().1, jpg);
+}

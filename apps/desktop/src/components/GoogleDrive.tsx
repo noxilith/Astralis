@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Check, ChevronDown, ChevronRight, Cloud, ExternalLink, Mail, Trash2, FolderOpen } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Cloud, ExternalLink, Mail, RefreshCw, Trash2 } from 'lucide-react'
 import { api, type CloudInvite, type GoogleStatus, type Vault } from '../api'
 import { useApp } from '../context'
 import { useCollab } from '../lib/collab'
@@ -164,30 +164,24 @@ export function CloudInvitesModal({ vault, onClose }: { vault: Vault; onClose: (
   const [invites, setInvites] = useState<CloudInvite[] | null>(null)
   const [email, setEmail] = useState('')
   const [busy, setBusy] = useState(false)
-  // Google wants the owner to pick the vault folder once; this is what to finish afterwards.
-  const [needsAccess, setNeedsAccess] = useState<{ retry: () => Promise<void> } | null>(null)
+  // A member's older Astralis still has files in the folder; what to try again once they update.
+  const [blocked, setBlocked] = useState<{ retry: () => Promise<void> } | null>(null)
   const load = () => api.cloudInvites(vault.id).then(setInvites).catch(fail)
-  /** Runs a sharing change; if Google first needs the folder picked, asks for that instead. */
+  /** Runs a sharing change; if members' old files are in the way, explains that instead. */
   const sharing = async (change: () => Promise<void>) => {
     try {
       await change()
-      setNeedsAccess(null)
+      setBlocked(null)
     } catch (e) {
-      if (String((e as { message?: string })?.message ?? e).includes('needs-folder-access')) setNeedsAccess({ retry: change })
+      if (String((e as { message?: string })?.message ?? e).includes('members-files-in-folder')) setBlocked({ retry: change })
       else fail(e)
     }
   }
-  const grant = async () => {
-    if (!needsAccess) return
+  const retry = async () => {
+    if (!blocked) return
     setBusy(true)
-    try {
-      await api.cloudGrantFolder(vault.id)
-      await sharing(needsAccess.retry)
-    } catch (e) {
-      fail(e)
-    } finally {
-      setBusy(false)
-    }
+    await sharing(blocked.retry)
+    setBusy(false)
   }
   useEffect(() => {
     load()
@@ -211,7 +205,7 @@ export function CloudInvitesModal({ vault, onClose }: { vault: Vault; onClose: (
       <p className="small muted" style={{ marginTop: 0 }}>
         Invite someone by their Google email. Google emails them the vault's Drive folder; in Astralis they choose{' '}
         <b>Join shared vault from Google Drive…</b> and pick it. Then you edit together live — no pairing code. Google only ever stores
-        encrypted data.
+        encrypted data. Drive keeps your own devices in sync; the people you invite sync with you directly while you're both online.
       </p>
       <div className="row" style={{ marginBottom: 12 }}>
         <input
@@ -226,19 +220,19 @@ export function CloudInvitesModal({ vault, onClose }: { vault: Vault; onClose: (
           {busy ? <Spinner /> : <Mail size={13} />} Invite
         </button>
       </div>
-      {needsAccess && (
+      {blocked && (
         <div className="drive-access">
-          <b>Google needs your OK once</b>
+          <b>Waiting for the people in this vault to update Astralis</b>
           <p className="small muted">
-            The people in this vault have added files to its folder, and Google only lets Astralis change who the folder is shared with
-            once you've given it access to everything in it. In the Google window that opens, go into the <b>Astralis</b> folder and pick{' '}
-            <b>{vault.name}</b>. You only need to do this once for this vault.
+            Someone here still has files in this vault's Drive folder from an older version of Astralis, and Google won't let Astralis
+            change who the folder is shared with until they're gone. They're removed automatically once everyone in the vault has updated
+            Astralis (1.0.2 or newer) and opened it. Then try again.
           </p>
           <div className="row" style={{ gap: 8 }}>
-            <button className="btn primary" disabled={busy} onClick={grant}>
-              {busy ? <Spinner /> : <FolderOpen size={13} />} Pick the folder in Google Drive
+            <button className="btn primary" disabled={busy} onClick={retry}>
+              {busy ? <Spinner /> : <RefreshCw size={13} />} Try again
             </button>
-            <button className="btn ghost" disabled={busy} onClick={() => setNeedsAccess(null)}>
+            <button className="btn ghost" disabled={busy} onClick={() => setBlocked(null)}>
               Cancel
             </button>
           </div>

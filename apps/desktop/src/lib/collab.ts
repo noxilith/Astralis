@@ -53,6 +53,11 @@ export function startCollab(onSynced: () => void) {
   const refresh = () => p2p.status().then((s) => ((peers = s.peers), setMe(s.name, s.color), notify())).catch(() => {})
   refresh()
   listen('p2p-ready', refresh)
+  // Notes an AI agent changed through the Brain's MCP server: refresh like a sync.
+  listen<string[]>('outside-edits', ({ payload: ids }) => {
+    onSynced()
+    window.dispatchEvent(new CustomEvent(SYNCED, { detail: ids }))
+  })
   listen<P2pEvent>('p2p', ({ payload: e }) => {
     switch (e.type) {
       case 'peers':

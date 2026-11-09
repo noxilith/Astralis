@@ -421,6 +421,41 @@ function SkillSection() {
   )
 }
 
+/** What AI agents may do with the user's own notes (the notes_* MCP tools). */
+function NotesAccess() {
+  const { fail } = useApp()
+  const [access, setAccess] = useState<'edit' | 'read' | 'off' | null>(null)
+  useEffect(() => void api.agentsNotesAccess().then(setAccess).catch(fail), [fail])
+  const choose = (a: 'edit' | 'read' | 'off') => {
+    setAccess(a)
+    api.agentsSetNotesAccess(a).catch(fail)
+  }
+  const options: ['edit' | 'read' | 'off', string, string][] = [
+    ['edit', 'Read and edit', 'Find, read, write, edit, move and delete notes, and organize folders. Every edit keeps the note\u2019s history, and deleted notes go to the archive first.'],
+    ['read', 'Read only', 'Find and read notes, but not change them.'],
+    ['off', 'No access', 'Only the Brain\u2019s memories.'],
+  ]
+  return (
+    <div className="brain-group" style={{ marginTop: 18 }}>
+      <div className="brain-group-title">Your notes</div>
+      <p className="small muted" style={{ marginTop: 0 }}>
+        Through the same server, AI agents can work with the notes in your vaults when you ask them to — never encrypted vaults. Changes show
+        up here right away.
+      </p>
+      {access &&
+        options.map(([value, label, hint]) => (
+          <label key={value} className="radio-row">
+            <input type="radio" name="agents-notes" checked={access === value} onChange={() => choose(value)} />
+            <span>
+              <b className="small">{label}</b>
+              <span className="small faint"> — {hint}</span>
+            </span>
+          </label>
+        ))}
+    </div>
+  )
+}
+
 function ConnectPanel() {
   const { fail, toast } = useApp()
   const [setup, setSetup] = useState<BrainSetup | null>(null)
@@ -447,6 +482,7 @@ function ConnectPanel() {
       <CopyBlock label="Cursor (~/.cursor/mcp.json) · Claude Desktop · other MCP apps" text={json} />
       <SkillSection />
       <CopyBlock label="Without the skill — add this to your project's CLAUDE.md or AGENTS.md instead" text={hint} />
+      <NotesAccess />
 
       <div className="brain-group" style={{ marginTop: 18 }}>
         <div className="brain-group-title">Markdown mirror</div>

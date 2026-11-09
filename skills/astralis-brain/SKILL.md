@@ -82,6 +82,17 @@ You don't need to map the whole repository. Map the files you actually needed; t
 
 If work is unfinished, or the next session needs to know where things stand, save or update **one** `context` memory for the project. Say what's done, what's next and anything blocking, in two or three lines. Keep a single current context memory: update it instead of adding a new one each session.
 
+## 7. The user's own notes
+
+The same server reaches the user's notes app: `notes_search`, `notes_list`, `notes_read`, `notes_create`, `notes_edit`, `notes_move`, `notes_delete`, and folders with `notes_folders` / `notes_folder_create` / `notes_folder_rename` / `notes_folder_delete`. Use them **only when the user asks** for something about their notes. They aren't the place for project memory; that's what the Brain is for.
+
+- Find the note first (`notes_search` or `notes_list`), then `notes_read` it before editing.
+- Edit small: `old_text` + `new_text` for a passage, `append` to add at the end. Rewrite the whole `body` only when asked to rewrite the note.
+- Keep the user's structure, wording and Markdown; change only what they asked for.
+- `notes_delete` archives the note; it can be restored. Delete it for good (`permanent: true`, on an archived note) only when the user clearly asked for that. Every edit keeps the previous version in the note's history.
+- `notes_move` files a note or a whole folder into another folder, out to the top level (`to_folder: "/"`), or into another vault. Deleting a folder keeps what's in it (it moves up a level).
+- If a tool says the user allows reading only, or no access, say so and suggest the change instead.
+
 ## Token discipline, in short
 
 - One `brain_context` per task, then targeted `brain_recall` / `brain_map` lookups.

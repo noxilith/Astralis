@@ -75,5 +75,9 @@ Drive; each person still signs in and approves access.
 - **Between different people,** edits flow P2P whenever two members are online. Google only lets
   each person's copy of Astralis read Drive files it made itself or that the person picked (that
   is how `drive.file` works). So the Drive acts as the offline mailbox for your own devices.
+- **Only the folder's owner uploads.** Files a member put in your folder would be unreadable to
+  everyone else, and Google refuses to change who a folder is shared with while it holds files your
+  copy of Astralis can't touch. So members don't upload (and Astralis 1.0.2+ removes any files an
+  older version uploaded).
 - **The sign-in token** is kept in this device's Astralis database. **Disconnect** removes it and
   revokes it at Google.

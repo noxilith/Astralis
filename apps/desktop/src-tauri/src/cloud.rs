@@ -172,14 +172,14 @@ pub fn cloud_invites(state: S<'_>, vault_id: Uuid) -> Result<Vec<CloudInvite>> {
     state.store.lock().unwrap().cloud_invites(vault_id)
 }
 
-/// Starts the error the app recognizes: the owner has to pick the vault's folder once in the
-/// Google Picker (see `astralis_cloud::needs_folder_access`), then `cloud_grant_folder`.
-const NEEDS_FOLDER_ACCESS: &str = "needs-folder-access";
+/// Starts the error the app recognizes: a member's older Astralis still has files in the folder
+/// (see `astralis_cloud::members_files_in_the_way`).
+const MEMBERS_FILES: &str = "members-files-in-folder";
 
 fn sharing_err(e: anyhow::Error) -> Error {
-    if astralis_cloud::needs_folder_access(&e) {
+    if astralis_cloud::members_files_in_the_way(&e) {
         Error::Invalid(format!(
-            "{NEEDS_FOLDER_ACCESS}: Google needs you to give Astralis access to this vault's folder once, because the people in it have added files to it."
+            "{MEMBERS_FILES}: someone in this vault still has files in its Drive folder from an older Astralis, and Google won't change who the folder is shared with until they're gone. They disappear once everyone in the vault has updated Astralis (1.0.2 or newer) and opened it."
         ))
     } else {
         err(e)
@@ -192,18 +192,6 @@ pub async fn cloud_invite(state: S<'_>, vault_id: Uuid, email: String) -> Result
     let (_, from) = me(&state)?;
     let d = drive(&state).await?;
     astralis_cloud::invite(&d, &state.store, vault_id, &email, &from).await.map_err(sharing_err)
-}
-
-/// The owner picks the vault's folder in the Google Picker, which lets Astralis reach every file
-/// in it (the members' too, now and later). Needed once per vault before its sharing can change.
-#[tauri::command]
-pub async fn cloud_grant_folder(state: S<'_>, vault_id: Uuid) -> Result<()> {
-    let folder = astralis_cloud::owned_folder(&state.store, vault_id).map_err(err)?;
-    let (picked, _) = sign_in(state.inner(), true).await?;
-    if !picked.iter().any(|p| *p == folder) {
-        return Err(Error::Invalid("that wasn't this vault's folder; pick it inside the Astralis folder in your Google Drive".into()));
-    }
-    Ok(())
 }
 
 /// Takes someone out of a cloud vault (Drive access and, if they joined, their copy).
