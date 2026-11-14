@@ -3,6 +3,7 @@
 #
 #   ./run.sh app          Launch the desktop app in dev mode (hot reload)
 #   ./run.sh second       Open a second app window with its own profile (try P2P on one machine)
+#   ./run.sh mobile       Android emulator with the app installed and running (first run downloads ~2.5 GB)
 #   ./run.sh test         Run the core test suite (default)
 #   ./run.sh build        Build release installers
 #   ./run.sh ui           Run just the frontend in a browser (with a mock backend)
@@ -126,6 +127,81 @@ EOF
     export CPLUS_INCLUDE_PATH="$prefix/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
 }
 
+
+# ./run.sh mobile: an Android emulator with Astralis installed and started. The first run downloads
+# Java, the Android tools and a phone image (about 2.5 GB) into .deps/android; after that it's quick.
+android_emulator() {
+    local base="$ROOT/.deps/android" avd="astralis"
+    local image="system-images;android-35;google_apis;x86_64"
+    export ANDROID_HOME="$base/sdk" ANDROID_SDK_ROOT="$base/sdk" ANDROID_AVD_HOME="$base/avd"
+    mkdir -p "$base" "$ANDROID_AVD_HOME"
+
+    if [[ "$(uname -m)" != x86_64 ]]; then echo "This emulator setup is for x86_64 computers." >&2; exit 1; fi
+    if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+        echo "No access to /dev/kvm: the emulator would be far too slow to use." >&2
+        echo "  Enable virtualization (VT-x / AMD-V) in the BIOS, then:  sudo usermod -aG kvm \$USER  (log out and in)" >&2
+        exit 1
+    fi
+
+    # Java 17 (the Android command-line tools need it): the system's if there is one, else a private copy.
+    if ! command -v java >/dev/null 2>&1; then
+        if [[ ! -x "$base/jdk/bin/java" ]]; then
+            echo "Downloading Java 17 (one time)…"
+            rm -rf "$base/jdk" && mkdir -p "$base/jdk"
+            curl -fL --progress-bar "https://api.adoptium.net/v3/binary/latest/17/ga/linux/x64/jdk/hotspot/normal/eclipse" | tar -xz -C "$base/jdk" --strip-components=1
+        fi
+        export JAVA_HOME="$base/jdk" PATH="$base/jdk/bin:$PATH"
+    fi
+
+    local sdkm="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+    if [[ ! -x "$sdkm" ]]; then
+        echo "Downloading the Android command-line tools (one time)…"
+        local zip="$base/cmdline-tools.zip"
+        curl -fL --progress-bar -o "$zip" "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+        rm -rf "$base/ct" && mkdir -p "$base/ct" "$ANDROID_HOME/cmdline-tools"
+        (cd "$base/ct" && bsdtar -xf "$zip" 2>/dev/null || python3 -m zipfile -e "$zip" "$base/ct")
+        mv "$base/ct/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+        chmod +x "$ANDROID_HOME"/cmdline-tools/latest/bin/*
+        rm -rf "$base/ct" "$zip"
+    fi
+    local bin="$ANDROID_HOME/cmdline-tools/latest/bin" adb="$ANDROID_HOME/platform-tools/adb"
+    if [[ ! -x "$adb" || ! -x "$ANDROID_HOME/emulator/emulator" || ! -d "$ANDROID_HOME/system-images/android-35" ]]; then
+        echo "Installing the emulator and a phone image (one time, about 2 GB)…"
+        yes | "$bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+        "$bin/sdkmanager" "platform-tools" "emulator" "$image"
+    fi
+    if [[ ! -d "$ANDROID_AVD_HOME/$avd.avd" ]]; then
+        echo "Creating the virtual phone…"
+        echo no | "$bin/avdmanager" create avd -n "$avd" -k "$image" -d pixel_6 --force
+    fi
+
+    # The app: ASTRALIS_APK=/path/to.apk, else the newest successful "Mobile" build from GitHub.
+    local apk="${ASTRALIS_APK:-}"
+    if [[ -z "$apk" ]]; then
+        command -v gh >/dev/null 2>&1 || { echo "Install the GitHub CLI (gh), or pass ASTRALIS_APK=/path/to/app.apk" >&2; exit 1; }
+        local run
+        run="$(gh run list --workflow mobile.yml --status success --limit 1 --json databaseId -q '.[0].databaseId')"
+        [[ -n "$run" ]] || { echo "No successful Mobile build yet (GitHub → Actions → Mobile → Run workflow)." >&2; exit 1; }
+        local dir="$base/apk/$run"
+        if [[ ! -d "$dir" ]]; then
+            echo "Downloading the app from build $run…"
+            mkdir -p "$dir" && gh run download "$run" -n android-apk -D "$dir"
+        fi
+        apk="$(find "$dir" -name '*.apk' | head -1)"
+    fi
+    [[ -f "$apk" ]] || { echo "No APK at: $apk" >&2; exit 1; }
+
+    if ! "$adb" devices | grep -q "^emulator-.*device$"; then
+        echo "Starting the emulator…"
+        (nohup "$ANDROID_HOME/emulator/emulator" -avd "$avd" -no-snapshot-save -no-boot-anim "$@" >"$base/emulator.log" 2>&1 &)
+        "$adb" wait-for-device
+        until [[ "$("$adb" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == 1 ]]; do sleep 2; done
+    fi
+    echo "Installing Astralis…"
+    "$adb" install -r -g "$apk"
+    "$adb" shell monkey -p app.astralis.desktop -c android.intent.category.LAUNCHER 1 >/dev/null
+    echo "Astralis is running in the emulator. Logs:  $adb logcat | grep -i astralis"
+}
 cmd="${1:-test}"
 [ $# -gt 0 ] && shift
 
@@ -140,6 +216,7 @@ if [[ "${ASTRALIS_GPU:-}" == 1 ]]; then
 fi
 
 case "$cmd" in
+    mobile|--mobile) android_emulator "$@" ;;
     app)    need_webkit; need_npm
             # The Brain's server for AI agents (Brain → Connect). Shows progress: it can take a
             # minute after updates.
