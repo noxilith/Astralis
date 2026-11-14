@@ -1,5 +1,7 @@
-//! "Ask Astralis": the in-app assistant's persona and how requests are put together. The model
-//! itself is in `llm.rs`; this part is plain text and testable without it.
+//! "Ask Astralis": the in-app assistant for the note you're writing. It does one kind of work:
+//! rewrite, expand, shorten, fix, format, continue or summarize a note (or the selected part of
+//! it), or answer a question about it. The model itself is in `llm.rs`; this part is plain text
+//! and testable without it.
 
 use serde::{Deserialize, Serialize};
 
@@ -23,124 +25,100 @@ pub struct Prompt {
     pub turns: Vec<ChatTurn>,
 }
 
-/// Who the assistant is. Kept short: a small model follows a few firm rules better than many.
-pub const PERSONA: &str = "You are Astralis, the assistant inside the user's notes app. You are blunt, practical and brutally honest, like an experienced founder reviewing a pitch.
+/// What a reply is for, which decides what the app offers to do with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Output {
+    /// The new version of the text (the note, or the selection): can replace it.
+    Rewrite,
+    /// New text to add after the note or the selection.
+    Insert,
+    /// An answer to read (or copy).
+    Answer,
+}
 
-Rules:
-- Never flatter. Don't call an idea good unless it really is. If it's a bad idea or won't pay off, say so plainly.
-- Always be open about the return on investment: the realistic time and money it will cost against the realistic payoff (money, users or learning). Use the likely case, not the best case.
-- Be specific to the user's note. Point out the real problems (scope, inexperience, crowded market, no clear hook, cost) instead of generic advice.
-- When asked to write or rewrite the note, reply with ONLY the note itself (# headings, short paragraphs, - lists), with no preamble and no code block.
-- Plans are concrete: phases, tasks, rough times, and the first step for today. Cut anything a first version doesn't need.
-- Don't invent facts about the project; if something important is missing, say what.";
+/// A one-click job in the panel.
+pub struct Action {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub hint: &'static str,
+    pub group: &'static str,
+    pub output: Output,
+    instruction: &'static str,
+}
 
-/// How every opinion is given: a verdict, what's wrong, the ROI and whether to do it.
-const JUDGE: &str = "Answer in exactly this format:
-**Verdict:** Good idea, Weak idea or Bad idea — then one blunt sentence why.
-**What's wrong with it:** the biggest problems, specific to this note (and anything else I asked).
-**Will it pay off?** Worth it, Not worth it, or Only if… — realistic cost (time and money, as ranges) against the realistic payoff (the likely case).
-**Should you do it?** Yes, No, or Only if… — and the cheapest way to test it in a week or less.";
-
-/// Writing the note: do what was asked, and still end with an honest take.
-const WRITE: &str = "Reply with ONLY the note itself, doing what I asked: no preamble and no code block. End the note with a ## Honest take section: the verdict (Good, Weak or Bad idea) and whether it will pay off (realistic cost against realistic payoff), in 2 or 3 blunt lines.";
-
-/// Planning: concrete, and still honest about whether it's worth it.
-const PLAN: &str = "Answer in exactly this format:
-**Scope for version 1:** what's in, and what's cut until later.
-**Phases:** 3 to 5 phases, each with its tasks and a rough time.
-**Milestones:** how they'll know each phase is done.
-**First step today:** one task that takes under 2 hours.
-**Honest take:** the verdict and whether it will pay off, in one or two blunt sentences.";
-
-/// Coming up with ideas: a few honest options, each with its payoff, and a pick.
-const IDEAS: &str = "Give me 3 to 5 ideas that fit what I asked (and my note, if it has anything). Use exactly this format for each:
-### 1. Name — one sentence on what it is
-**Why it could work:** who would want it and why.
-**Competition:** the main apps or products it's up against, and how crowded it is.
-**Will it pay off?** Worth it, Long shot, or Not worth it — rough effort against the realistic payoff.
-
-After the ideas, end with **My pick:** the one with the best payoff (never one you rated Not worth it), why, and the first step to test it this week. Be honest: most ideas don't pay off, so don't call them all worth it. Prefer small, specific ideas one person can build and test over crowded ones.";
-
-/// Any other question: a straight answer, still honest about whether it's worth it.
-const ASK: &str = "Answer my question directly and specifically, in short paragraphs or a list. Be brutally honest. If it's about making or doing something, end with **Will it pay off?** and a one-line verdict on whether it's worth the time and money.";
-
-/// Quick prompts offered in the panel: (label, what the user's message says, the answer format
-/// the model is held to). The format is added only for the model, right before it replies.
-pub const QUICK_PROMPTS: &[(&str, &str, &str)] = &[
-    ("Be brutally honest", "Is this a good idea? Be brutally honest.", JUDGE),
-    (
-        "Will it pay off?",
-        "Will this pay off?",
-        "Answer in exactly this format:
-**ROI verdict:** Worth it, Not worth it, or Only if… — one blunt sentence.
-**What it will cost:** realistic time and money for this person, as ranges.
-**Realistic payoff:** money, users or learning, as ranges, with the likely case (not the best case).
-**Why:** the 2 or 3 facts that decide it.
-**How to improve the odds:** the 2 changes that matter most.",
-    ),
-    ("Make a plan", "Make a plan to build and finish this.", PLAN),
-    ("Give me ideas", "Give me some ideas worth building.", IDEAS),
-    (
-        "Write it up",
-        "Rewrite this note so it explains the idea, lists its features and plans how to finish it.",
-        "Reply with ONLY the new note itself: a # title, a short paragraph explaining the idea, a ## Features list, a ## Plan with phases and rough times, a ## Risks list, and a ## Honest take section with the verdict (Good, Weak or Bad idea) and whether it will pay off, in 2 or 3 blunt lines. No preamble and no code block.",
-    ),
+pub const ACTIONS: &[Action] = &[
+    Action { id: "improve", label: "Improve writing", hint: "Clearer, better flow", group: "Rewrite", output: Output::Rewrite,
+        instruction: "Rewrite the text so it reads clearly and flows well. Keep its meaning, structure and roughly its length. Fix any mistakes." },
+    Action { id: "expand", label: "Expand", hint: "More detail, same voice", group: "Rewrite", output: Output::Rewrite,
+        instruction: "Expand the text: develop each point with more detail and examples taken from what it already says. Keep its structure and voice. Don't invent facts; if a detail isn't there, leave it out. Make it about one and a half to two times longer." },
+    Action { id: "shorten", label: "Shorten", hint: "Half as long", group: "Rewrite", output: Output::Rewrite,
+        instruction: "Make the text about half as long. Keep every key point; cut repetition and filler." },
+    Action { id: "grammar", label: "Fix grammar", hint: "Spelling and punctuation only", group: "Rewrite", output: Output::Rewrite,
+        instruction: "Fix only spelling, grammar and punctuation. Don't reword, reorder, add or remove anything else." },
+    Action { id: "format", label: "Make it look better", hint: "Headings, lists, emphasis", group: "Rewrite", output: Output::Rewrite,
+        instruction: "Format the text so it looks good and is easy to scan: a clear # title if it has none, ## headings for sections, short paragraphs, - bullet lists where it lists things, and **bold** for key terms. Don't change the wording and don't add content." },
+    Action { id: "professional", label: "Professional tone", hint: "Polished and formal", group: "Rewrite", output: Output::Rewrite,
+        instruction: "Rewrite the text in a professional, polished tone. Keep the meaning and the facts." },
+    Action { id: "casual", label: "Casual tone", hint: "Relaxed and friendly", group: "Rewrite", output: Output::Rewrite,
+        instruction: "Rewrite the text in a relaxed, friendly, conversational tone. Keep the meaning and the facts." },
+    Action { id: "checklist", label: "Make a checklist", hint: "Tasks you can tick off", group: "Create", output: Output::Rewrite,
+        instruction: "Turn the text into a checklist: one `- [ ]` line per task or step, short and starting with a verb, in the same order. Use ## headings to group them if there are many." },
+    Action { id: "continue", label: "Continue writing", hint: "The next paragraphs", group: "Create", output: Output::Insert,
+        instruction: "Continue writing from where the text ends: add the next one to three paragraphs (or the next list items) in the same style and voice. Reply with ONLY the new text, not the existing text." },
+    Action { id: "summarize", label: "Summarize", hint: "Key points at a glance", group: "Create", output: Output::Insert,
+        instruction: "Summarize the text: one sentence, then 3 to 5 bullet points with the key points. Reply with ONLY the summary." },
+    Action { id: "titles", label: "Suggest titles", hint: "Five options", group: "Ask", output: Output::Answer,
+        instruction: "Suggest 5 short, specific titles for this note as a numbered list. Nothing else." },
+    Action { id: "feedback", label: "Feedback", hint: "What to fix or add", group: "Ask", output: Output::Answer,
+        instruction: "Give honest, specific feedback on the writing: what's unclear, what's missing, what to cut or reorder. 3 to 6 short bullet points. Don't rewrite the text." },
 ];
 
-/// What a message asks for, which decides how the answer is shaped. Every kind stays honest
-/// about whether it's worth it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Intent {
-    /// Write or rewrite the note.
-    Write,
-    Plan,
-    /// An opinion on the idea: verdict, problems, ROI.
-    Judge,
-    /// Come up with ideas.
-    Ideas,
-    /// Anything else: a straight answer.
-    Ask,
+pub fn action(id: &str) -> Option<&'static Action> {
+    ACTIONS.iter().find(|a| a.id == id)
 }
 
-pub fn intent(message: &str) -> Intent {
-    let m = format!(" {} ", message.to_lowercase());
-    let has = |words: &[&str]| words.iter().any(|w| m.contains(w));
-    if has(&[
-        " write", "rewrite", "re-write", "turn this", "turn it", "make this note", "make the note", "make it a note", "draft", "expand",
-        "summarize", "summarise", "organize", "organise", "clean up", "clean this", "format this", "reword", "put this into", "fill this",
-        "fill the note", "update the note", "add to the note", "into a note", "explain my", "list its", "list the features", "list out",
-    ]) {
-        Intent::Write
-    } else if has(&[" plan", "roadmap", "steps to", "how do i build", "how do i make", "how should i build", "how should i start", "timeline", "milestone"]) {
-        Intent::Plan
-    } else if has(&[
-        "good idea", "bad idea", "should i", "worth", "pay off", "payoff", " roi", "thoughts", "what do you think", "what if", "would people",
-        "will people", "honest", "is this", "is it ", "rate ", "viable", "feedback", "opinion", "critique", "make this?", "do this?", "any good",
-    ]) {
-        Intent::Judge
-    } else if has(&[
-        "come up with", "give me", "ideas", "an idea", " idea?", "brainstorm", "suggest", "think of", "recommend", "inspire", "what should i make",
-        "what should i build", "what can i make", "what could i make", "something to make", "something to build",
-    ]) {
-        Intent::Ideas
+/// What the user asked for.
+#[derive(Debug, Clone, Default)]
+pub struct Request {
+    /// One of [`ACTIONS`] (by id), or none for a message typed in the box.
+    pub action: Option<String>,
+    /// What was typed (extra wishes for an action, or the whole request).
+    pub message: String,
+    /// The part of the note that's selected; the work applies to it instead of the whole note.
+    pub selection: Option<String>,
+}
+
+/// The kind of reply a typed message is after: a question gets an answer; anything else is a
+/// request to change the text.
+pub fn output_for(message: &str) -> Output {
+    let m = message.trim().to_lowercase();
+    let first = m.split_whitespace().next().unwrap_or("");
+    let question = m.ends_with('?')
+        || matches!(first, "what" | "what's" | "whats" | "why" | "how" | "who" | "when" | "where" | "which" | "is" | "are" | "does" | "do" | "did" | "can" | "could" | "should" | "would" | "will" | "any" | "explain" | "tell" | "list" | "suggest" | "give" | "find");
+    let write = matches!(first, "continue" | "write" | "add" | "append") && !m.starts_with("add to ") && !m.contains("section");
+    if question {
+        Output::Answer
+    } else if write && (m.starts_with("continue") || m.contains("paragraph") || m.contains("next")) {
+        Output::Insert
     } else {
-        Intent::Ask
+        Output::Rewrite
     }
 }
 
-/// The answer format kept right before the reply (a small model weighs what it read last most).
-fn guide(message: &str) -> &'static str {
-    if let Some((_, _, format)) = QUICK_PROMPTS.iter().find(|(_, said, _)| *said == message.trim()) {
-        return format;
-    }
-    match intent(message) {
-        Intent::Write => WRITE,
-        Intent::Plan => PLAN,
-        Intent::Judge => JUDGE,
-        Intent::Ideas => IDEAS,
-        Intent::Ask => ASK,
-    }
-}
+/// Who the assistant is. Kept short: a small model follows a few firm rules better than many.
+pub const PERSONA: &str = "You are the writing assistant inside the user's notes app. You work only on the user's note.
+
+Rules:
+- Keep the user's language, voice, names and facts. Never invent facts, numbers, dates, names or quotes.
+- Keep Markdown that is already there: # headings, - lists, - [ ] tasks, **bold**, [[links]] and images. Never delete a [[link]] or an image.
+- When you write or edit, reply with ONLY the resulting text: no introduction, no explanation of what you changed, no closing remark and no code block.
+- When asked a question, answer it briefly and specifically from the note. If the note doesn't say, say so.";
+
+/// The longest text a rewrite can take: the whole thing has to fit in the reply as well.
+pub const REWRITE_MAX: usize = 3200;
+
+const FORMAT_RULE: &str = "Reply with ONLY the resulting text.";
 
 /// Tidies a finished reply. The small model sometimes wraps the whole answer in a code block, or
 /// repeats it after a line like "Written Markdown:"; both are cut away.
@@ -155,6 +133,13 @@ pub fn clean_reply(text: &str) -> String {
         let head = t[..cut.min(t.len())].trim();
         if !head.is_empty() {
             t = head;
+        }
+    }
+    // An introduction line ("Sure! Here is the improved note:") before the text.
+    if let Some((first, rest)) = t.split_once('\n') {
+        let f = first.trim().to_lowercase();
+        if f.ends_with(':') && f.len() < 80 && ["sure", "here", "certainly", "okay", "of course", "absolutely"].iter().any(|w| f.starts_with(w)) && !rest.trim().is_empty() {
+            t = rest.trim();
         }
     }
     // The note's quoting echoed back: around everything, or a copy of the note after the answer.
@@ -200,33 +185,65 @@ pub fn trim_note(body: &str, max_chars: usize) -> String {
     format!("{}\n\n[… middle of the note left out …]\n\n{}", &body[..h], &body[t..])
 }
 
-/// Puts a request together: the persona, the note, the recent conversation and the new message.
-/// `budget_chars` bounds the whole thing (the model has a small context window).
-pub fn build_prompt(note_title: &str, note_body: &str, history: &[ChatTurn], message: &str, budget_chars: usize) -> Prompt {
-    let note = trim_note(note_body.trim(), budget_chars / 2);
-    let context = if note.is_empty() {
-        format!("The note \"{}\" is empty so far.", note_title.trim())
-    } else {
-        format!("My note is titled \"{}\". This is what it says now:\n\n\"\"\"\n{}\n\"\"\"", note_title.trim(), note)
+/// Puts a request together: the persona, the text to work on, a little conversation and the job.
+/// `budget_chars` bounds the whole thing (the model has a small context window). Fails, with a
+/// message for the user, when a rewrite wouldn't fit (rewriting a cut-down note would lose text).
+pub fn build_prompt(note_title: &str, note_body: &str, history: &[ChatTurn], req: &Request, budget_chars: usize) -> Result<(Prompt, Output), String> {
+    let chosen = req.action.as_deref().map(|id| action(id).ok_or_else(|| format!("unknown action {id}"))).transpose()?;
+    let output = chosen.map_or_else(|| output_for(&req.message), |a| a.output);
+    let selection = req.selection.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let whole = note_body.trim();
+    let text = selection.unwrap_or(whole);
+    if text.is_empty() && output != Output::Answer && chosen.is_none_or(|a| a.id != "titles") {
+        return Err("The note is empty. Write a little first, then ask me to work on it.".into());
+    }
+    if output == Output::Rewrite && text.chars().count() > REWRITE_MAX {
+        return Err(if selection.is_some() {
+            "That selection is too long for me to rewrite in one go. Select a shorter part (a few paragraphs).".into()
+        } else {
+            "This note is too long for me to rewrite in one go. Select a section (a few paragraphs) and ask again.".into()
+        });
+    }
+    let shown = trim_note(text, budget_chars.saturating_sub(PERSONA.len() + 1200).clamp(1500, budget_chars / 2));
+    let what = if selection.is_some() { "the selected text" } else { "the note" };
+    let job = match chosen {
+        Some(a) => {
+            let extra = req.message.trim();
+            if extra.is_empty() { a.instruction.to_string() } else { format!("{} Also: {extra}", a.instruction) }
+        }
+        None => match output {
+            Output::Rewrite => format!("{} Apply this to the text and reply with the complete new text: {}", FORMAT_RULE, req.message.trim()),
+            Output::Insert => format!("{} Write new text to go after the text, as asked: {}", FORMAT_RULE, req.message.trim()),
+            Output::Answer => format!("Answer this about the text, briefly and specifically: {}", req.message.trim()),
+        },
     };
-    let message = format!("{}\n\n{}", message.trim(), guide(message));
-    let message = message.as_str();
-    // Keep the most recent turns that fit what's left.
+    let context = if shown.is_empty() {
+        format!("The note \"{}\" is empty so far.", note_title.trim())
+    } else if selection.is_some() {
+        format!("This is part of my note \"{}\". The selected text:\n\n\"\"\"\n{}\n\"\"\"", note_title.trim(), shown)
+    } else {
+        format!("My note is titled \"{}\". Its text:\n\n\"\"\"\n{}\n\"\"\"", note_title.trim(), shown)
+    };
+    let message = format!("{job}\n(Work on {what}.)");
+
+    // Typed follow-ups can lean on the last exchange ("shorter", "now in French"); one-click
+    // actions always start from the text as it is now.
     let mut left = budget_chars.saturating_sub(context.len() + message.len() + PERSONA.len());
     let mut kept: Vec<ChatTurn> = Vec::new();
-    for t in history.iter().rev() {
-        if t.text.len() > left {
-            break;
+    if chosen.is_none() {
+        for t in history.iter().rev().take(2) {
+            if t.text.len() > left / 2 {
+                break;
+            }
+            left -= t.text.len();
+            kept.push(t.clone());
         }
-        left -= t.text.len();
-        kept.push(t.clone());
+        kept.reverse();
+        if kept.first().is_some_and(|t| t.role == ChatRole::Assistant) {
+            kept.remove(0); // a conversation must start with the user
+        }
     }
-    kept.reverse();
-    // The note goes with the first message the model sees.
     let mut turns = Vec::with_capacity(kept.len() + 1);
-    if kept.first().is_some_and(|t| t.role == ChatRole::Assistant) {
-        kept.remove(0); // a conversation must start with the user
-    }
     if kept.is_empty() {
         turns.push(ChatTurn { role: ChatRole::User, text: format!("{context}\n\n{message}") });
     } else {
@@ -234,87 +251,108 @@ pub fn build_prompt(note_title: &str, note_body: &str, history: &[ChatTurn], mes
         first.text = format!("{context}\n\n{}", first.text);
         turns.push(first);
         turns.extend(kept);
-        turns.push(ChatTurn { role: ChatRole::User, text: message.to_string() });
+        turns.push(ChatTurn { role: ChatRole::User, text: message });
     }
-    Prompt { system: PERSONA.to_string(), turns }
+    Ok((Prompt { system: PERSONA.to_string(), turns }, output))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn prompt_carries_the_note_and_recent_conversation() {
-        let history = vec![
-            ChatTurn { role: ChatRole::User, text: "I want to make a farming game.".into() },
-            ChatTurn { role: ChatRole::Assistant, text: "What makes it different?".into() },
-        ];
-        let p = build_prompt("Game idea", "Cozy farming + space.", &history, "Be brutally honest.", 6000);
-        assert!(p.system.contains("brutally honest"));
-        assert_eq!(p.turns.len(), 3);
-        assert!(p.turns[0].text.contains("Cozy farming + space.") && p.turns[0].text.contains("farming game"));
-        assert_eq!(p.turns[2].role, ChatRole::User);
-        assert!(p.turns[2].text.starts_with("Be brutally honest.") && p.turns[2].text.contains(JUDGE));
+    fn req(action: Option<&str>, message: &str, selection: Option<&str>) -> Request {
+        Request { action: action.map(Into::into), message: message.into(), selection: selection.map(Into::into) }
     }
 
     #[test]
-    fn long_notes_and_histories_are_cut_to_fit() {
+    fn an_action_works_on_the_note_and_says_what_it_gives_back() {
+        let (p, out) = build_prompt("Trip", "pack bags then go to airport", &[], &req(Some("improve"), "", None), 8000).unwrap();
+        assert_eq!(out, Output::Rewrite);
+        assert_eq!(p.turns.len(), 1);
+        assert!(p.turns[0].text.contains("pack bags then go to airport") && p.turns[0].text.contains("Rewrite the text so it reads clearly"));
+        assert!(p.turns[0].text.ends_with("(Work on the note.)"));
+        assert!(p.system.contains("ONLY the resulting text"));
+        assert_eq!(build_prompt("T", "x", &[], &req(Some("continue"), "", None), 8000).unwrap().1, Output::Insert);
+        assert_eq!(build_prompt("T", "x", &[], &req(Some("feedback"), "", None), 8000).unwrap().1, Output::Answer);
+        assert!(build_prompt("T", "x", &[], &req(Some("nope"), "", None), 8000).is_err());
+    }
+
+    #[test]
+    fn a_selection_is_what_gets_worked_on() {
+        let (p, _) = build_prompt("Trip", "Intro text.\n\nThe middle part.\n\nOutro.", &[], &req(Some("shorten"), "", Some("The middle part.")), 8000).unwrap();
+        let t = &p.turns[0].text;
+        assert!(t.contains("The selected text") && t.contains("The middle part.") && !t.contains("Intro text."));
+        assert!(t.ends_with("(Work on the selected text.)"));
+    }
+
+    #[test]
+    fn extra_wishes_ride_along_with_an_action() {
+        let (p, _) = build_prompt("T", "hello", &[], &req(Some("expand"), "focus on the budget", None), 8000).unwrap();
+        assert!(p.turns[0].text.contains("Also: focus on the budget"));
+    }
+
+    #[test]
+    fn typed_messages_are_questions_or_edits() {
+        for q in ["what is this note about?", "is the second paragraph clear", "how many tasks are left", "list the open questions", "suggest a better opening"] {
+            assert_eq!(output_for(q), Output::Answer, "{q}");
+        }
+        for q in ["make the intro shorter", "translate it to French", "add a section about pricing", "rewrite the last paragraph", "remove the second bullet"] {
+            assert_eq!(output_for(q), Output::Rewrite, "{q}");
+        }
+        for q in ["continue the story", "write the next paragraph"] {
+            assert_eq!(output_for(q), Output::Insert, "{q}");
+        }
+    }
+
+    #[test]
+    fn a_follow_up_leans_on_the_last_exchange_but_an_action_does_not() {
+        let history = vec![
+            ChatTurn { role: ChatRole::User, text: "Make it formal".into() },
+            ChatTurn { role: ChatRole::Assistant, text: "Dear sir,".into() },
+        ];
+        let (p, _) = build_prompt("T", "hello", &history, &req(None, "now shorter", None), 8000).unwrap();
+        assert_eq!(p.turns.len(), 3);
+        assert!(p.turns[0].text.contains("Make it formal") && p.turns[2].role == ChatRole::User);
+        let (p, _) = build_prompt("T", "hello", &history, &req(Some("shorten"), "", None), 8000).unwrap();
+        assert_eq!(p.turns.len(), 1);
+    }
+
+    #[test]
+    fn a_rewrite_that_would_lose_text_is_refused() {
+        let long = "word ".repeat(1000);
+        let err = build_prompt("Long", &long, &[], &req(Some("improve"), "", None), 8000).unwrap_err();
+        assert!(err.contains("too long") && err.contains("Select"));
+        // Reading or adding doesn't need the whole thing to fit.
+        assert!(build_prompt("Long", &long, &[], &req(Some("summarize"), "", None), 8000).is_ok());
+        assert!(build_prompt("Long", &long, &[], &req(None, "what is this about?", None), 8000).is_ok());
+        // A short selection of a long note is fine.
+        assert!(build_prompt("Long", &long, &[], &req(Some("improve"), "", Some("a short bit")), 8000).is_ok());
+    }
+
+    #[test]
+    fn an_empty_note_asks_for_something_to_work_on() {
+        assert!(build_prompt("New", "  ", &[], &req(Some("improve"), "", None), 8000).is_err());
+        assert!(build_prompt("New", "  ", &[], &req(Some("titles"), "", None), 8000).is_ok());
+    }
+
+    #[test]
+    fn long_notes_are_cut_to_fit_when_only_reading() {
         let body = "a".repeat(20_000);
-        let history: Vec<ChatTurn> = (0..50)
-            .map(|i| ChatTurn { role: if i % 2 == 0 { ChatRole::User } else { ChatRole::Assistant }, text: "x".repeat(400) })
-            .collect();
-        let p = build_prompt("Long", &body, &history, "Summarize", 6000);
+        let (p, _) = build_prompt("Long", &body, &[], &req(Some("summarize"), "", None), 6000).unwrap();
         let total: usize = p.turns.iter().map(|t| t.text.len()).sum();
         assert!(total <= 6000, "{total}");
         assert!(p.turns[0].text.contains("middle of the note left out"));
-        assert_eq!(p.turns[0].role, ChatRole::User);
-        assert!(p.turns.last().unwrap().text.starts_with("Summarize"));
     }
 
     #[test]
-    fn quick_prompts_bring_their_answer_format() {
-        let (_, said, format) = QUICK_PROMPTS[0];
-        let p = build_prompt("Idea", "A thing.", &[], said, 6000);
-        assert!(p.turns[0].text.ends_with(format));
-    }
-
-    #[test]
-    fn every_kind_of_message_stays_honest_about_the_idea_and_its_roi() {
-        for q in ["should i make this?", "is this a good idea", "thoughts on adding multiplayer?", "would people buy it"] {
-            assert_eq!(intent(q), Intent::Judge, "{q}");
-        }
-        for q in ["make this note explain my idea for this game and list its features", "rewrite it shorter", "Write a pitch"] {
-            assert_eq!(intent(q), Intent::Write, "{q}");
-        }
-        for q in ["make a plan to finish it", "what's the roadmap"] {
-            assert_eq!(intent(q), Intent::Plan, "{q}");
-        }
-        for q in ["give me a good app idea", "can you help me come up with an idea", "brainstorm some side projects", "any ideas for a game?"] {
-            assert_eq!(intent(q), Intent::Ideas, "{q}");
-        }
-        for q in ["which engine is easiest for 2d?", "how does steam pricing work"] {
-            assert_eq!(intent(q), Intent::Ask, "{q}");
-        }
-        for format in [JUDGE, WRITE, PLAN, IDEAS, ASK] {
-            assert!(format.contains("pay off"));
-        }
-        assert!(QUICK_PROMPTS.iter().all(|(_, _, f)| f.contains("pay off") || f.contains("ROI")));
-    }
-
-    #[test]
-    fn replies_lose_wrapping_code_blocks_and_repeats() {
+    fn replies_lose_wrapping_code_blocks_and_preambles() {
         assert_eq!(clean_reply("```markdown\n# Title\n\nText\n```"), "# Title\n\nText");
-        assert_eq!(clean_reply("**Verdict:** Bad idea.\n Written Markdown:\n\n```markdown\n**Verdict:** Bad idea.\n```"), "**Verdict:** Bad idea.");
         assert_eq!(clean_reply("Use ```rust code``` here"), "Use ```rust code``` here");
         assert_eq!(clean_reply("  plain  "), "plain");
         assert_eq!(clean_reply("Text.\n\n**\n\"\"\"\nnote copy"), "Text.");
         assert_eq!(clean_reply("<note>\n# Game\nText\n</note>"), "# Game\nText");
-        assert_eq!(clean_reply("**Verdict:** Weak idea.\n\n<note>\nGame idea: copy\n</note>"), "**Verdict:** Weak idea.");
-    }
-
-    #[test]
-    fn an_empty_note_is_said_to_be_empty() {
-        let p = build_prompt("New idea", "  ", &[], "Write it up", 6000);
-        assert!(p.turns[0].text.starts_with("The note \"New idea\" is empty"));
+        assert_eq!(clean_reply("Sure! Here is the improved note:\n\n# Trip\nGo."), "# Trip\nGo.");
+        assert_eq!(clean_reply("Here's a shorter version:\n\nPack and go."), "Pack and go.");
+        assert_eq!(clean_reply("Here is what matters\nit is long"), "Here is what matters\nit is long");
     }
 }

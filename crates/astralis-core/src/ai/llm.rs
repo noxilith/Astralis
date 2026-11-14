@@ -1,6 +1,7 @@
-//! A local language model that writes: Phi-3 mini (4k, MIT) as a quantized GGUF, run on the CPU
-//! with llama.cpp. It powers "Ask Astralis" — writing and rewriting notes, and honest talk about
-//! ideas — entirely on this device.
+//! A local language model that edits and writes notes: Qwen2.5 1.5B Instruct (Apache-2.0) as a
+//! quantized GGUF, run on the CPU with llama.cpp. It powers "Ask Astralis" — rewriting,
+//! expanding and tidying notes — entirely on this device. (Small on purpose: editing text
+//! doesn't need a big model, and this one answers about 2.5x faster than Phi-3 mini did.)
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -19,10 +20,10 @@ use crate::ai::assistant::{ChatRole, Prompt};
 use crate::error::{Error, Result};
 
 /// The model file (in its folder). Its tokenizer is inside it.
-pub const MODEL_FILE: &str = "Phi-3-mini-4k-instruct-q4.gguf";
-/// Where to get it (Microsoft's official release on Hugging Face).
+pub const MODEL_FILE: &str = "qwen2.5-1.5b-instruct-q4_k_m.gguf";
+/// Where to get it (the Qwen team's official release on Hugging Face, 1.1 GB).
 pub const DOWNLOADS: &[(&str, &str)] =
-    &[(MODEL_FILE, "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf")];
+    &[(MODEL_FILE, "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf")];
 /// The model's context window (prompt + answer, in tokens).
 pub const CONTEXT: usize = 4096;
 /// How many prompt tokens are read per step.
@@ -91,7 +92,7 @@ impl Llm {
         let gpu = use_gpu();
         let params = LlamaModelParams::default().with_n_gpu_layers(if gpu { 999 } else { 0 });
         let model = LlamaModel::load_from_file(backend()?, &path, &params).map_err(err)?;
-        let stop = ["<|end|>", "<|endoftext|>", "<|user|>", "<|assistant|>"]
+        let stop = ["<|im_end|>", "<|endoftext|>", "<|im_start|>"]
             .iter()
             .filter_map(|t| match model.vocab().tokenize(t.as_bytes(), false, true).as_slice() {
                 [one] => Some(*one),
@@ -119,29 +120,17 @@ impl Llm {
         self.model.vocab().tokenize(text.as_bytes(), false, false).len()
     }
 
-    /// Phi-3's chat format (the system message is folded into the first user turn).
+    /// The model's chat format (ChatML), with the system message as its own turn.
     fn format(prompt: &Prompt) -> String {
-        let mut out = String::new();
-        let mut system = Some(prompt.system.as_str());
+        let mut out = format!("<|im_start|>system\n{}<|im_end|>\n", prompt.system);
         for turn in &prompt.turns {
-            match turn.role {
-                ChatRole::User => {
-                    out.push_str("<|user|>\n");
-                    if let Some(s) = system.take() {
-                        out.push_str(s);
-                        out.push_str("\n\n");
-                    }
-                    out.push_str(&turn.text);
-                    out.push_str("<|end|>\n");
-                }
-                ChatRole::Assistant => {
-                    out.push_str("<|assistant|>\n");
-                    out.push_str(&turn.text);
-                    out.push_str("<|end|>\n");
-                }
-            }
+            let role = match turn.role {
+                ChatRole::User => "user",
+                ChatRole::Assistant => "assistant",
+            };
+            out.push_str(&format!("<|im_start|>{role}\n{}<|im_end|>\n", turn.text));
         }
-        out.push_str("<|assistant|>\n");
+        out.push_str("<|im_start|>assistant\n");
         out
     }
 
@@ -169,7 +158,7 @@ impl Llm {
 
     /// Writes a reply, calling `on_text` with each new piece; return `false` from it to stop.
     pub fn generate(&mut self, prompt: &Prompt, max_new: usize, mut on_text: impl FnMut(&str) -> bool) -> Result<String> {
-        let tokens = self.model.vocab().tokenize(Self::format(prompt).as_bytes(), true, true);
+        let tokens = self.model.vocab().tokenize(Self::format(prompt).as_bytes(), false, true);
         let max_new = max_new.min(CONTEXT.saturating_sub(tokens.len() + 8));
         if max_new < 32 {
             return Err(Error::invalid("the note and conversation are too long for the model; start a new chat or shorten the note"));
@@ -194,10 +183,11 @@ impl Llm {
 
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(7);
         let mut sampler = LlamaSampler::chain_simple([
-            LlamaSampler::penalties(self.model.n_vocab(), 64, 1.1, 0.0, 0.0),
+            // Light on repeats: editing a note means saying much of it again.
+            LlamaSampler::penalties(self.model.n_vocab(), 64, 1.05, 0.0, 0.0),
             LlamaSampler::top_k(40),
             LlamaSampler::top_p(0.9, 1),
-            LlamaSampler::temp(0.6),
+            LlamaSampler::temp(0.4),
             LlamaSampler::dist(seed),
         ]);
 

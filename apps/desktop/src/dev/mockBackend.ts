@@ -10,6 +10,43 @@ type Args = Record<string, any> // eslint-disable-line @typescript-eslint/no-exp
 const now = () => Date.now()
 const id = () => crypto.randomUUID()
 const vaults: Vault[] = [{ id: id(), name: 'Personal', createdAt: now(), encrypted: false, unlocked: true, noteCount: 0, owner: null, sharedWith: [], cloud: null }]
+/** A deterministic test graph: ~60% one linked web with hubs, ~20% small clusters, the rest alone. */
+function bigGraph(total: number, includeOrphans: boolean) {
+  // `&lone=1`: no links at all, like the Brain vault (memories don't link to each other).
+  const lone = new URLSearchParams(location.search).get('lone') === '1'
+  let seed = 12345
+  const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296)
+  const nodes: { id: string; kind: 'note'; title: string; tags: string[]; pinned: boolean; degree: number }[] = []
+  const edges: { source: string; target: string }[] = []
+  const mk = (i: number) => {
+    const n = { id: `big-${i}`, kind: 'note' as const, title: `Note ${i}`, tags: [], pinned: false, degree: 0 }
+    nodes.push(n)
+    return n
+  }
+  const link = (a: number, b: number) => {
+    if (a === b) return
+    edges.push({ source: `big-${a}`, target: `big-${b}` })
+    nodes[a].degree++
+    nodes[b].degree++
+  }
+  const web = lone ? 0 : Math.floor(total * 0.6)
+  for (let i = 0; i < web; i++) {
+    mk(i)
+    if (i > 0) link(i, Math.floor(rnd() * rnd() * i))
+    if (i > 8 && rnd() < 0.5) link(i, Math.floor(rnd() * i))
+  }
+  const clusters = lone ? 0 : Math.floor((total * 0.2) / 8)
+  for (let c = 0; c < clusters; c++) {
+    const start = nodes.length
+    for (let k = 0; k < 8; k++) {
+      mk(start + k)
+      if (k > 0) link(start + k, start + Math.floor(rnd() * k))
+    }
+  }
+  while (nodes.length < total) mk(nodes.length)
+  return { nodes: includeOrphans ? nodes : nodes.filter((n) => n.degree > 0), edges }
+}
+
 const notes: Note[] = []
 const folders: Folder[] = []
 const tasks: Task[] = []
@@ -23,6 +60,8 @@ const templates: Template[] = [
 ]
 
 let assistantReady = false
+let hooksInstalled = false
+let hooksStop = false
 let agentsAccess = 'edit'
 const mockMe = { name: "noxilith", color: "#8b7bff" }
 const google: { clientId: string | null; email: string | null } = { clientId: null, email: null }
@@ -51,6 +90,13 @@ const extraMems = (() => {
   const projects: [string, number][] = [['astralis', 40], ['website', 22], ['dotfiles', 12], ['Me', 6]]
   const out: ReturnType<typeof mem>[] = []
   for (const [p, n] of projects) for (let i = 0; i < n; i++) out.push(mem(p === 'Me' ? 'me' : p, p, kinds[(i * 5 + p.length) % kinds.length], `${p} memory ${i + 1}`, i % 3 ? 'claude-code' : 'codex', i % 7 === 0, (i * 3) % 9))
+  // `?brain=1000` makes a big test Brain (like `./run.sh seed-test-brain`).
+  const big = Number(new URLSearchParams(location.search).get('brain')) || 0
+  const bigProjects = ['astralis', 'website', 'dotfiles', 'api', 'mobile', 'infra', 'research']
+  for (let i = 0; i < big; i++) {
+    const p = i % 40 === 0 ? 'Me' : bigProjects[i % bigProjects.length]
+    out.push(mem(p === 'Me' ? 'me' : p, p, kinds[(i * 5 + 3) % kinds.length], `${p} test memory ${i + 1}`, i % 3 ? 'claude-code' : 'codex', i % 97 === 0, (i * 7) % 11))
+  }
   return out
 })()
 const docs = new Map<string, Y.Doc>()
@@ -163,11 +209,24 @@ const handlers: Record<string, (a: Args) => unknown> = {
   find_by_title: ({ vaultId, title }) => inVault(vaultId).filter((n) => n.title.toLowerCase() === title.toLowerCase()).map(ref),
   suggest_titles: ({ vaultId, query }) => inVault(vaultId).filter((n) => n.title.toLowerCase().includes(query.toLowerCase())).map(ref),
   graph: ({ vaultId, includeOrphans }) => {
+    // `?galaxy=1000`: a big test graph like `./run.sh seed-test-vault` (a big web, small clusters, lone notes).
+    const total = Number(new URLSearchParams(location.search).get('galaxy')) || 0
+    if (total) return bigGraph(total, !!includeOrphans)
     const active = inVault(vaultId).filter((n) => !n.archivedAt && !n.encrypted)
     const edges = active.flatMap((s) =>
       links(s.body).flatMap((l) => active.filter((t) => t.title.toLowerCase() === l.toLowerCase()).map((t) => ({ source: s.id, target: t.id }))),
     )
     const nodes = active.map((n) => ({ id: n.id, kind: n.kind, title: n.title, tags: n.tags, pinned: n.pinned, degree: edges.filter((e) => e.source === n.id || e.target === n.id).length }))
+    // `?planets=8` in the address adds that many linked notes to the first one (to look at a busy system).
+    const extra = Number(new URLSearchParams(location.search).get('planets')) || 0
+    if (extra && nodes[0]) {
+      for (let i = 0; i < extra; i++) {
+        const fid = `fake-planet-${i}`
+        nodes.push({ id: fid, kind: 'note', title: `Planet ${i + 1}`, tags: [], pinned: false, degree: 1 })
+        edges.push({ source: nodes[0].id, target: fid })
+      }
+      nodes[0].degree += extra
+    }
     return { nodes: includeOrphans ? nodes : nodes.filter((n) => n.degree > 0), edges }
   },
   note_history: () => [],
@@ -194,6 +253,14 @@ const handlers: Record<string, (a: Args) => unknown> = {
     vaults.splice(vaults.indexOf(find(vaults, k)), 1)
     for (let i = notes.length - 1; i >= 0; i--) if (notes[i].vaultId === k) notes.splice(i, 1)
   },
+  matugen_colors: () => ({ path: '~/.config/astralis/matugen.json', json: JSON.stringify({ mode: 'dark', bg: '#10140f', elev: '#171d16', elev2: '#1e261d', hover: '#273226', active: '#2f4a2b', border: '#2c3a2b', borderStrong: '#46604a', text: '#e0e6dc', muted: '#a9b8a5', faint: '#6f8a72', accent: '#7fd98a', danger: '#ff8a80' }) }),
+  brain_hooks_status: () => ({ installed: hooksInstalled, stop: hooksStop, path: '~/.claude/settings.json' }),
+  brain_install_hooks: ({ stop }) => ((hooksInstalled = true), (hooksStop = !!stop), { installed: true, stop: !!stop, path: '~/.claude/settings.json' }),
+  brain_remove_hooks: () => ((hooksInstalled = false), (hooksStop = false), { installed: false, stop: false, path: '~/.claude/settings.json' }),
+  brain_cloud_on: () => { const v = vaults.find((x) => x.name === 'Brain'); if (v) v.cloud = 'google-drive' },
+  brain_cloud_off: () => { const v = vaults.find((x) => x.name === 'Brain'); if (v) v.cloud = null },
+  brain_use_vault: () => undefined,
+  move_folder_to_vault: ({ id, to }) => { for (const n of notes) if (n.folderId === id) Object.assign(n, { vaultId: to, folderId: null }); return id },
   move_note_to_vault: ({ noteId, vaultId }) => Object.assign(find(notes, noteId), { vaultId, folderId: null, encrypted: find(vaults, vaultId).encrypted }),
   // tasks
   create_task: ({ input }) => {
@@ -240,7 +307,8 @@ const handlers: Record<string, (a: Args) => unknown> = {
   ],
   get_setting: ({ key }) => settings.get(key) ?? null,
   set_setting: ({ key, value }) => void settings.set(key, value),
-  check_grammar: () => [],
+  // Flags "universe" and "stays" so the right-click menu can be tried.
+  check_grammar: ({ text }) => [...text.matchAll(/universe|stays/g)].map((m) => ({ start: m.index!, end: m.index! + m[0].length, message: 'Possible spelling mistake', kind: 'spelling', fixes: [{ kind: 'replace', text: 'Universe' }] })),
   brain_status: () => ({ loaded: false, model: 'mock', neural: false, indexed: notes.length, pending: 0 }),
   related_notes: () => [],
   suggest_tags: () => [{ tag: 'example', score: 0.5, source: 'keyword' }],
@@ -281,23 +349,31 @@ const handlers: Record<string, (a: Args) => unknown> = {
   cloud_join: () => 'Shared vault',
   cloud_sync_now: () => undefined,
   // Ask Astralis (pretend: canned replies).
-  assistant_status: () => ({ ready: assistantReady, downloading: false, loaded: assistantReady, quickPrompts: [
-    ['Be brutally honest', 'Is this a good idea? Be brutally honest.'],
-    ['Will it pay off?', 'Will this pay off?'],
-    ['Make a plan', 'Make a concrete plan.'],
-    ['Write it up', 'Rewrite this note so it explains the idea, lists its features and ends with a plan.'],
-    ['Give me ideas', 'Give me some ideas worth building.'],
+  assistant_status: () => ({ ready: assistantReady, downloading: false, loaded: assistantReady, actions: [
+    { id: 'improve', label: 'Improve writing', hint: 'Clearer, better flow', group: 'Rewrite', output: 'rewrite' },
+    { id: 'expand', label: 'Expand', hint: 'More detail, same voice', group: 'Rewrite', output: 'rewrite' },
+    { id: 'shorten', label: 'Shorten', hint: 'Half as long', group: 'Rewrite', output: 'rewrite' },
+    { id: 'grammar', label: 'Fix grammar', hint: 'Spelling and punctuation only', group: 'Rewrite', output: 'rewrite' },
+    { id: 'format', label: 'Make it look better', hint: 'Headings, lists, emphasis', group: 'Rewrite', output: 'rewrite' },
+    { id: 'professional', label: 'Professional tone', hint: 'Polished and formal', group: 'Rewrite', output: 'rewrite' },
+    { id: 'casual', label: 'Casual tone', hint: 'Relaxed and friendly', group: 'Rewrite', output: 'rewrite' },
+    { id: 'checklist', label: 'Make a checklist', hint: 'Tasks you can tick off', group: 'Create', output: 'rewrite' },
+    { id: 'continue', label: 'Continue writing', hint: 'The next paragraphs', group: 'Create', output: 'insert' },
+    { id: 'summarize', label: 'Summarize', hint: 'Key points at a glance', group: 'Create', output: 'insert' },
+    { id: 'titles', label: 'Suggest titles', hint: 'Five options', group: 'Ask', output: 'answer' },
+    { id: 'feedback', label: 'Feedback', hint: 'What to fix or add', group: 'Ask', output: 'answer' },
   ] }),
   assistant_download: () => void (assistantReady = true),
-  assistant_chat: ({ message }) =>
-    /idea/i.test(message)
-      ? "### 1. Plant Doctor — snap a photo of a sick houseplant, get the likely cause\n**Why it could work:** new plant owners panic and search for help.\n**Competition:** crowded (PictureThis, Planta).\n**Will it pay off?** Long shot — 2–3 months for a likely few hundred users.\n\n### 2. <your city> Gig Board — local one-off jobs for students\n**Why it could work:** small, local, easy to test.\n**Competition:** Craigslist, Facebook groups.\n**Will it pay off?** Worth it as a learning project — a weekend to build.\n\n**My pick:** the gig board: you can test it this week with a simple form."
-      : /pay off|honest/i.test(message)
-      ? "**Verdict:** Weak idea — fun premise, but nothing yet that makes players pick it.\n\nA cozy farming game is one of the most crowded genres on Steam, and \"farming + space\" alone isn't a hook players will notice.\n\n**ROI:** 12–18 months solo for a likely few thousand sales. Unless you can show a unique mechanic in a 30-second clip, it won't pay off.\n\n**Biggest risks**\n- No clear reason to pick it over Stardew Valley\n- Scope creep (crops × planets × seasons)\n\n**Make it better:** prototype the one mechanic that's new (e.g. low-gravity crops) in 2 weeks and test it on 20 players before committing."
-      : "# Starfield Farm\n\nA cozy farming game set on small planets, where gravity and day length change how crops grow.\n\n## Features\n- Planet-hopping farms with different gravity\n- Crops that adapt to each planet\n- Trading between colonies\n\n## Plan\n1. **Weeks 1–2:** prototype low-gravity crop growth\n2. **Weeks 3–6:** one planet, full farming loop\n3. **Weeks 7–10:** second planet + trading\n4. **Weeks 11–12:** polish, Steam page, demo\n\n**First step today:** sketch the crop-growth rules on paper.",
+  assistant_chat: ({ action, selection }) =>
+    action === 'summarize' ? "Welcome note for new users.\n\n- Start with Ctrl+N\n- Link notes with [[double brackets]]\n- Open the graph to see everything"
+    : action === 'titles' || action === 'feedback' ? "1. Welcome to Astralis\n2. Start Here\n3. Your Universe of Notes"
+    : selection ? 'A tighter version of the selected text.'
+    : "# Welcome to Astralis\n\nYour notes, as a universe. Everything you write stays on this computer.\n\n## Start here\n- **New note:** press Ctrl+N\n- **Link notes:** use [[double brackets]]",
   assistant_cancel: () => undefined,
   assistant_unload: () => undefined,
   agents_notes_access: () => agentsAccess,
+  agents_plan_access: () => 'edit',
+  agents_set_plan_access: () => undefined,
   agents_set_notes_access: ({ access }) => void (agentsAccess = access),
   // Updates (pretend: a newer release is out).
   update_check: () => ({ current: '1.0.0', latest: '1.1.0', canInstall: true, install: 'AppImage', notes: '## What’s new\n- Faster galaxy graph\n- Ask Astralis remembers chats\n- Fixes for shared vaults', page: 'https://github.com/noxilith/Astralis/releases/latest', size: 98_400_000 }),
@@ -328,7 +404,7 @@ const handlers: Record<string, (a: Args) => unknown> = {
     })
     return { nodes, links }
   },
-  brain_stats: () => ({ recalls: 148, tokensServed: 23100, tokensSaved: 412800 }),
+  brain_stats: () => ({ recalls: 148, tokensServed: 23100, tokensSaved: 412800, hits: 97, misses: 21, memories: 112, used: 64 }),
   brain_setup: () => ({ server: '/home/you/Projects/Astralis/target/debug/astralis-mcp', serverExists: true, args: [], mirror: '/home/you/Astralis Brain', vault: 'brain' }),
   brain_set_mirror: ({ enabled }) => (enabled ? '/home/you/Astralis Brain' : null),
   brain_skill_status: () => skills,

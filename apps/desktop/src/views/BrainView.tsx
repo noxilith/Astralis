@@ -2,9 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { Archive, Bot, Brain, Check, CheckCheck, Copy, Eye, Layers, Merge, Network, PlugZap, Scan, Search, Sparkles, Trash2, User } from 'lucide-react'
 import { createNeural, KIND_HUE, type NeuralHandle } from './neural'
-import { api, type BrainProject, type BrainSetup, type BrainStats, type Memory, type MemoryKind, type SkillStatus, type TidyReport } from '../api'
+import { api, type BrainProject, type BrainSetup, type BrainStats, type HooksStatus, type Memory, type MemoryKind, type SkillStatus, type TidyReport } from '../api'
 import { useApp } from '../context'
 import { Empty, Spinner, useConfirm } from '../components/ui'
+import { useCollab } from '../lib/collab'
 import { relativeTime } from '../lib/time'
 
 const KIND_ORDER: MemoryKind[] = ['context', 'decision', 'gotcha', 'howto', 'preference', 'fact', 'summary', 'codemap']
@@ -86,9 +87,12 @@ export function BrainView() {
 
       <section className="brain-main">
         <div className="brain-stats">
-          <Stat value={fmt(stats?.recalls ?? 0)} label="lookups by your AI tools" />
-          <Stat value={`${fmt(stats?.tokensServed ?? 0)}`} label="tokens of memory served" />
-          <Stat value={`~${fmt(stats?.tokensSaved ?? 0)}`} label="tokens saved vs. loading everything" accent />
+          <Stat
+            value={fmt(stats?.recalls ?? 0)}
+            label={`lookups by your AI tools${stats && stats.hits + stats.misses > 0 ? ` · ${Math.round((stats.hits / (stats.hits + stats.misses)) * 100)}% of searches found something` : ''}`}
+          />
+          <Stat value={`${fmt(stats?.tokensServed ?? 0)}`} label={`tokens of memory served${stats && stats.memories > 0 ? ` · ${stats.used} of ${stats.memories} memories ever used` : ''}`} />
+          <Stat value={`~${fmt(stats?.tokensSaved ?? 0)}`} label="tokens saved vs. loading every memory (an upper bound)" accent />
         </div>
 
         <div className="brain-tabs">
@@ -196,7 +200,28 @@ function NeuralPanel({ memories }: { memories: Memory[] }) {
     queryRef.current = query
   }, [query])
   // Rebuild when the memories change (new, edited, forgotten).
-  const key = memories.map((m) => m.id + m.updatedAt + m.recallCount).join()
+  // (Recalls don't rebuild it: they just light the memory up. The network is otherwise still.)
+  const key = memories.map((m) => m.id + m.updatedAt).join()
+  const netKey = useRef('')
+  const seen = useRef<Map<string, string> | null>(null)
+  const pending = useRef<string[]>([])
+  const flush = (k: string) => {
+    if (net.current && netKey.current === k && pending.current.length) {
+      net.current.pulse(pending.current)
+      pending.current = []
+    }
+  }
+  // A memory an agent just recalled, saved or edited lights up.
+  useEffect(() => {
+    const now = new Map(memories.map((m) => [m.id, `${m.recallCount}:${m.updatedAt}`]))
+    if (seen.current && net.current) {
+      const hit = memories.filter((m) => seen.current!.get(m.id) !== now.get(m.id)).map((m) => m.id)
+      pending.current.push(...hit)
+      flush(key)
+    }
+    seen.current = now
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [memories])
   useEffect(() => {
     let off = false
     api
@@ -207,6 +232,8 @@ function NeuralPanel({ memories }: { memories: Memory[] }) {
         net.current = createNeural(canvas.current, g, openNote)
         net.current.setQuery(queryRef.current)
         net.current.setSurface(surfaceRef.current)
+        netKey.current = key
+        flush(key)
         setCount(g.nodes.length)
       })
       .catch(fail)
@@ -215,6 +242,10 @@ function NeuralPanel({ memories }: { memories: Memory[] }) {
     }
   }, [key, openNote, fail])
   useEffect(() => () => net.current?.destroy(), [])
+  // Dev only: `__astralisNeural().benchmark()` in the console times a frame.
+  useEffect(() => {
+    if (import.meta.env.DEV) (window as unknown as { __astralisNeural?: () => NeuralHandle | null }).__astralisNeural = () => net.current
+  }, [])
   useEffect(() => net.current?.setQuery(query), [query])
   const kinds = (['decision', 'gotcha', 'howto', 'preference', 'fact', 'context'] as MemoryKind[]).filter((k) => memories.some((m) => m.kind === k))
   return (
@@ -356,7 +387,7 @@ function TidyPanel({ folder, memories, onChange }: { folder: string | null; memo
   )
 }
 
-function CopyBlock({ label, text }: { label: string; text: string }) {
+export function CopyBlock({ label, text }: { label: string; text: string }) {
   const { toast } = useApp()
   return (
     <div className="brain-copy">
@@ -421,37 +452,200 @@ function SkillSection() {
   )
 }
 
+/**
+ * Hooks make the Brain automatic: the index arrives when a session starts, and memories that clearly
+ * match a message are added to it, so the AI uses what it saved instead of digging through chat logs.
+ * (Claude Code runs them; they cost nothing when nothing matches.)
+ */
+function HooksSection({ server, args }: { server: string; args: string[] }) {
+  const { fail, toast } = useApp()
+  const [status, setStatus] = useState<HooksStatus | null>(null)
+  const [stop, setStop] = useState(false)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => void api.brainHooksStatus().then((s) => (setStatus(s), setStop(s.stop))).catch(() => {}), [])
+  const quoteCmd = (s: string) => (/^[\w./:@+\\-]+$/.test(s) ? s : `"${s.replace(/"/g, '\\"')}"`)
+  const cmd = (event: string) => [server, ...args, 'hook', event].map(quoteCmd).join(' ')
+  const hook = (event: string) => [{ hooks: [{ type: 'command', command: cmd(event), timeout: 10 }] }]
+  const main = JSON.stringify({ hooks: { SessionStart: hook('session-start'), UserPromptSubmit: hook('prompt') } }, null, 2)
+  const stopOnly = JSON.stringify({ hooks: { Stop: hook('stop') } }, null, 2)
+  const run = async (fn: () => Promise<HooksStatus>, done: string) => {
+    setBusy(true)
+    try {
+      const s = await fn()
+      setStatus(s)
+      setStop(s.stop)
+      toast(done)
+    } catch (e) {
+      fail(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="brain-group" style={{ marginTop: 18 }}>
+      <div className="brain-group-title">Make it automatic (Claude Code hooks)</div>
+      <p className="small muted" style={{ marginTop: 0 }}>
+        Without hooks the AI has to remember to ask the Brain. With them, the Brain's index is in its context when a session starts, and any memory that clearly matches what you
+        just said is added to your message (once per session, so it isn't paid for twice). It then has no reason to read old chat logs. Nothing is added when nothing matches.
+      </p>
+      <p className="small" style={{ margin: '0 0 8px' }}>
+        {status?.installed ? (
+          <>
+            <Check size={13} /> Installed in <span className="kbd">{status.path}</span>
+          </>
+        ) : (
+          <>Not installed yet. One click adds the hooks to <span className="kbd">{status?.path ?? '~/.claude/settings.json'}</span> (your other settings stay as they are, and the original is kept as a backup).</>
+        )}
+      </p>
+      <label className="checkbox" style={{ marginBottom: 8 }}>
+        <input type="checkbox" checked={stop} disabled={busy} onChange={(e) => setStop(e.target.checked)} />
+        Also remind the AI, when it's about to finish, to save what it learned and update the hand-off note (at most every 20 minutes; costs it one extra turn)
+      </label>
+      <div className="row" style={{ gap: 8 }}>
+        <button className="btn primary" disabled={busy} onClick={() => run(() => api.brainInstallHooks(stop), status?.installed ? 'Hooks updated' : 'Hooks installed — new Claude Code sessions use them')}>
+          {status?.installed ? 'Update hooks' : 'Install hooks'}
+        </button>
+        {status?.installed && (
+          <button className="btn" disabled={busy} onClick={() => run(() => api.brainRemoveHooks(), 'Hooks removed')}>
+            Remove hooks
+          </button>
+        )}
+      </div>
+      <details style={{ marginTop: 10 }}>
+        <summary className="small muted" style={{ cursor: 'pointer' }}>Or add them by hand</summary>
+        <CopyBlock label="Add to ~/.claude/settings.json (merge with an existing hooks section)" text={main} />
+        <CopyBlock label="Optional save reminder" text={stopOnly} />
+      </details>
+    </div>
+  )
+}
+
 /** What AI agents may do with the user's own notes (the notes_* MCP tools). */
-function NotesAccess() {
+function NotesAccess({ what = 'notes' }: { what?: 'notes' | 'plan' }) {
   const { fail } = useApp()
   const [access, setAccess] = useState<'edit' | 'read' | 'off' | null>(null)
-  useEffect(() => void api.agentsNotesAccess().then(setAccess).catch(fail), [fail])
+  const plan = what === 'plan'
+  useEffect(() => void (plan ? api.agentsPlanAccess() : api.agentsNotesAccess()).then(setAccess).catch(fail), [fail, plan])
   const choose = (a: 'edit' | 'read' | 'off') => {
     setAccess(a)
-    api.agentsSetNotesAccess(a).catch(fail)
+    ;(plan ? api.agentsSetPlanAccess(a) : api.agentsSetNotesAccess(a)).catch(fail)
   }
   const options: ['edit' | 'read' | 'off', string, string][] = [
-    ['edit', 'Read and edit', 'Find, read, write, edit, move and delete notes, and organize folders. Every edit keeps the note\u2019s history, and deleted notes go to the archive first.'],
-    ['read', 'Read only', 'Find and read notes, but not change them.'],
-    ['off', 'No access', 'Only the Brain\u2019s memories.'],
+    plan
+      ? ['edit', 'Read and edit', 'Plan projects, add and tick off tasks, and put appointments and work sessions on your calendar.']
+      : ['edit', 'Read and edit', 'Find, read, write, edit, move and delete notes, and organize folders. Every edit keeps the note\u2019s history, and deleted notes go to the archive first.'],
+    plan ? ['read', 'Read only', 'See your tasks and calendar, but not change them.'] : ['read', 'Read only', 'Find and read notes, but not change them.'],
+    plan ? ['off', 'No access', 'Tasks and calendar stay private.'] : ['off', 'No access', 'Only the Brain\u2019s memories.'],
   ]
   return (
     <div className="brain-group" style={{ marginTop: 18 }}>
-      <div className="brain-group-title">Your notes</div>
+      <div className="brain-group-title">{plan ? 'Tasks and calendar' : 'Your notes'}</div>
       <p className="small muted" style={{ marginTop: 0 }}>
-        Through the same server, AI agents can work with the notes in your vaults when you ask them to — never encrypted vaults. Changes show
-        up here right away.
+        {plan
+          ? 'AI agents can make planners (say, for building an app), manage your tasks and add appointments to your calendar when you ask them to. Changes show up here right away.'
+          : 'Through the same server, AI agents can work with the notes in your vaults when you ask them to — never encrypted vaults. Changes show up here right away.'}
       </p>
       {access &&
         options.map(([value, label, hint]) => (
           <label key={value} className="radio-row">
-            <input type="radio" name="agents-notes" checked={access === value} onChange={() => choose(value)} />
+            <input type="radio" name={plan ? "agents-plan" : "agents-notes"} checked={access === value} onChange={() => choose(value)} />
             <span>
               <b className="small">{label}</b>
               <span className="small faint"> — {hint}</span>
             </span>
           </label>
         ))}
+    </div>
+  )
+}
+
+/**
+ * Cloud Brain: the Brain's memories sync through Google Drive. Other devices hook up by pairing
+ * with this one and sharing the Brain vault; there, "Use as this device's Brain" switches over.
+ */
+function CloudBrain({ brainVault, reload }: { brainVault: string; reload: () => void }) {
+  const { fail, toast, vaults, refreshVaults } = useApp()
+  const { peers } = useCollab()
+  const [busy, setBusy] = useState(false)
+  const brain = vaults.find((v) => v.id === brainVault)
+  const mine = !!brain && !brain.owner
+  const others = vaults.filter((v) => v.id !== brainVault && v.cloud && v.owner && !v.encrypted)
+  const run = async (fn: () => Promise<unknown>, done: string) => {
+    setBusy(true)
+    try {
+      await fn()
+      await refreshVaults()
+      reload()
+      toast(done)
+    } catch (e) {
+      fail(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+  const paired = peers.filter((p) => p.trusted)
+  return (
+    <div className="brain-group" style={{ marginTop: 18 }}>
+      <div className="brain-group-title">Cloud Brain</div>
+      <p className="small muted" style={{ marginTop: 0 }}>
+        Keep the Brain's memories on your Google Drive (end-to-end encrypted) so every device you use shares one memory. Needs Google Drive set up in
+        Settings.
+      </p>
+      {brain && mine && !brain.cloud && (
+        <button className="btn primary" disabled={busy} onClick={() => run(() => api.brainCloudOn(), 'The Brain is on Google Drive')}>
+          Turn the Brain into a cloud vault
+        </button>
+      )}
+      {brain && brain.cloud && mine && (
+        <>
+          <p className="small" style={{ margin: '0 0 8px' }}>
+            <Check size={13} /> The Brain syncs through Google Drive. To hook up another device, pair it in Settings, then share the Brain with it here, and
+            choose “Use as this device's Brain” on that device.
+          </p>
+          {paired.length === 0 && <p className="small faint">No paired devices yet.</p>}
+          {paired.map((p) => {
+            const on = brain.sharedWith.includes(p.id)
+            return (
+              <label key={p.id} className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={on}
+                  disabled={busy}
+                  onChange={(e) =>
+                    run(
+                      () => (e.target.checked ? api.shareVault(brain.id, p.id) : api.unshareVault(brain.id, p.id)),
+                      e.target.checked ? `Sharing the Brain with ${p.name}` : `Stopped sharing with ${p.name}`,
+                    )
+                  }
+                />
+                <span>{p.name}</span>
+              </label>
+            )
+          })}
+          <button className="btn" style={{ marginTop: 8 }} disabled={busy} onClick={() => run(() => api.brainCloudOff(), 'The Brain stays on this device only')}>
+            Stop syncing the Brain
+          </button>
+        </>
+      )}
+      {brain && !mine && (
+        <p className="small" style={{ margin: 0 }}>
+          <Check size={13} /> This device uses the cloud Brain from {brain.owner}.
+        </p>
+      )}
+      {others.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div className="small muted">Shared from another device:</div>
+          {others.map((v) => (
+            <div key={v.id} className="row" style={{ gap: 8, marginTop: 4 }}>
+              <span className="small grow">{v.name}</span>
+              <button className="btn" disabled={busy} onClick={() => run(() => api.brainUseVault(v.id), `This device's Brain is now “${v.name}”`)}>
+                Use as this device's Brain
+              </button>
+            </div>
+          ))}
+          <p className="small faint">Memories already in this device's own Brain vault stay there; move them across with right-click → Move to vault.</p>
+        </div>
+      )}
     </div>
   )
 }
@@ -464,7 +658,7 @@ function ConnectPanel() {
   const cmd = [setup.server, ...setup.args]
   const toml = `[mcp_servers.astralis-brain]\ncommand = ${JSON.stringify(setup.server)}\nargs = ${JSON.stringify(setup.args)}`
   const json = JSON.stringify({ mcpServers: { 'astralis-brain': { command: setup.server, args: setup.args } } }, null, 2)
-  const hint = `Use the astralis-brain MCP tools as long-term memory: call brain_context at the start of a task, brain_recall / brain_map before re-reading files, and save what you learn with brain_remember / brain_map_note.`
+  const hint = `Use the astralis-brain MCP tools as long-term memory. Never search old chats, transcripts or logs for what was decided or learned before: ask the Brain. Call brain_context (with the task in a sentence) at the start, brain_recall / brain_map before re-reading files, code_outline / code_find instead of reading whole files, save what you learn with brain_remember / brain_map_note as you go, and call brain_handoff (where things stand, what's next) before you stop.`
   return (
     <div className="brain-body">
       {!setup.serverExists && (
@@ -481,8 +675,11 @@ function ConnectPanel() {
       <CopyBlock label="Codex — add to ~/.codex/config.toml" text={toml} />
       <CopyBlock label="Cursor (~/.cursor/mcp.json) · Claude Desktop · other MCP apps" text={json} />
       <SkillSection />
+      <HooksSection server={setup.server} args={setup.args} />
       <CopyBlock label="Without the skill — add this to your project's CLAUDE.md or AGENTS.md instead" text={hint} />
       <NotesAccess />
+      <NotesAccess what="plan" />
+      <CloudBrain brainVault={setup.vault} reload={() => void api.brainSetup().then(setSetup).catch(fail)} />
 
       <div className="brain-group" style={{ marginTop: 18 }}>
         <div className="brain-group-title">Markdown mirror</div>

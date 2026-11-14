@@ -22,12 +22,13 @@ import type { EditorView } from '@codemirror/view'
 import { api, p2p, type Folder, type Id, type Note, type TidyResult } from '../api'
 import { MarkdownBar } from '../components/MarkdownBar'
 import { AiMenu } from '../components/AiMenu'
-import { setImageWidth } from '../lib/attachments'
+import { setImageWidth, toggleTask } from '../lib/attachments'
 import { SYNCED, connectedCount, throttle, useCollab } from '../lib/collab'
 import { openNoteSession, type NoteSession } from '../lib/noteSession'
 import { useApp } from '../context'
 import { Editor } from '../components/Editor'
 import { Markdown } from '../components/Markdown'
+import { PreviewFind } from '../components/PreviewFind'
 import { WhiteboardEditor } from '../components/WhiteboardEditor'
 import { UnlockVault, vaultIcon } from '../components/VaultSwitcher'
 import { folderPath } from '../components/NotesNav'
@@ -49,6 +50,8 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
   const [current, setCurrent] = useState<Note | null>(null)
   const [editorKey, setEditorKey] = useState(0)
   const [preview, setPreview] = useState(false)
+  const [findOpen, setFindOpen] = useState(false)
+  const previewHost = useRef<HTMLDivElement>(null)
   const [showPanel, setShowPanel] = useState(true)
   // The side panel's tab: the note's details, or the chat with the built-in AI (remembered).
   const [tab, setTab] = useState<SideTab>(() => {
@@ -126,7 +129,6 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
       .then((n) => {
         if (n.vaultId !== vaultId) setVaultId(n.vaultId)
         setCurrent(n)
-        setPreview(false)
         draft.current = { id: n.id, title: n.title, body: n.body }
         setEditorKey((k) => k + 1)
       })
@@ -191,6 +193,19 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
     return () => sendCaret(null, null, null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current?.id])
+  // Ctrl+F in a rendered note (the editor has its own find bar).
+  const rendered = !!current && current.kind === 'note' && (preview || !!current.archivedAt)
+  useEffect(() => {
+    if (!rendered) return setFindOpen(false)
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault()
+        setFindOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [rendered])
   const here = current ? collab.presence.filter((p) => p.noteId === current.id) : []
 
   // The shared text document behind the editor (loaded per note / editor remount).
@@ -288,18 +303,39 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
   const readOnly = !!current.archivedAt
   const panel = panelOpen
 
-  /** Puts assistant text into the note (through the editor when open, so it saves, syncs and undoes). */
-  const putIntoNote = (text: string, mode: 'replace' | 'append') => {
+  /**
+   * Puts assistant text into the note (through the editor when open, so it saves, syncs and
+   * undoes). `target` is the selected text the assistant worked on: `replace` swaps it for the
+   * text, `after` adds the text below it; without a target they mean the whole note / its end.
+   */
+  const putIntoNote = (text: string, mode: 'replace' | 'after', target?: string) => {
     const view = viewRef.current
+    const body = view ? view.state.doc.toString() : draft.current?.body ?? current.body
+    let from = 0
+    let to = body.length
+    if (target) {
+      const i = body.indexOf(target)
+      if (i < 0) return toast('That part of the note has changed since — select it again and retry')
+      from = i
+      to = i + target.length
+    }
+    const insert = mode === 'replace' ? text : (to > 0 ? '\n\n' : '') + text
+    const range = mode === 'replace' ? { from, to, insert } : { from: to, insert }
+    const done = mode === 'replace' ? (target ? 'Selection replaced' : 'Note replaced') : 'Added to the note'
     if (view && !readOnly) {
-      const len = view.state.doc.length
-      const insert = mode === 'replace' ? text : (len ? '\n\n' : '') + text
-      view.dispatch({ changes: mode === 'replace' ? { from: 0, to: len, insert } : { from: len, insert } })
-      toast(mode === 'replace' ? 'Note replaced — Ctrl+Z to undo' : 'Added to the note')
+      view.dispatch({ changes: range })
+      toast(`${done} — Ctrl+Z to undo`)
       return
     }
-    const body = mode === 'replace' ? text : `${draft.current?.body ?? current.body}\n\n${text}`
-    api.updateNote(current.id, { body }).then((n) => (replaceCurrent(n, true), toast('Note updated'))).catch(fail)
+    const next = body.slice(0, range.from) + range.insert + body.slice('to' in range ? range.to : range.from)
+    api.updateNote(current.id, { body: next }).then((n) => (replaceCurrent(n, true), toast(done))).catch(fail)
+  }
+
+  /** The text selected in the editor, for the assistant to work on. */
+  const selectedText = () => {
+    const v = viewRef.current
+    const r = v?.state.selection.main
+    return v && r && !r.empty ? v.state.sliceDoc(r.from, r.to) : ''
   }
 
   return (
@@ -447,11 +483,15 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
             <WhiteboardEditor key={`${current.id}:${editorKey}`} note={current} theme={theme} readOnly={readOnly} />
           ) : preview || readOnly ? (
             <div className="editor-host">
+              {findOpen && <PreviewFind host={previewHost} onClose={() => setFindOpen(false)} />}
+              <div ref={previewHost}>
               <Markdown
                 source={current.body}
                 onOpenLink={openLink}
+                onToggleTask={readOnly ? undefined : (i, checked) => edit({ body: toggleTask(draft.current?.body ?? current.body, i, checked) })}
                 onResizeImage={readOnly ? undefined : (src, occ, width) => edit({ body: setImageWidth(draft.current?.body ?? current.body, src, occ, width) })}
               />
+              </div>
             </div>
           ) : !session || session.noteId !== current.id ? (
             <div className="editor-host" />
@@ -492,7 +532,7 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
           </div>
           {chatMounted && (
             <div className="side-body side-chat" hidden={tab !== 'chat'}>
-              <AssistantPanel key={current.id} note={current} onReplace={(t) => putIntoNote(t, 'replace')} onAppend={(t) => putIntoNote(t, 'append')} />
+              <AssistantPanel key={current.id} note={current} getSelection={selectedText} onApply={putIntoNote} />
             </div>
           )}
         </div>

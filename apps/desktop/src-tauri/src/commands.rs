@@ -105,6 +105,7 @@ store_cmd!(create_folder(vault_id: Option<Uuid>, parent_id: Option<Uuid>, name: 
     => |s| s.create_folder(vault_id, parent_id, &name));
 store_cmd!(rename_folder(id: Uuid, name: String) -> Folder => |s| s.rename_folder(id, &name));
 store_cmd!(move_folder(id: Uuid, parent_id: Option<Uuid>) -> Folder => |s| s.move_folder(id, parent_id));
+store_cmd!(move_folder_to_vault(id: Uuid, from: Uuid, to: Uuid) -> Uuid => |s| s.move_folder_to_vault(id, from, to));
 store_cmd!(delete_folder(id: Uuid) -> () => |s| s.delete_folder(id));
 store_cmd!(move_note_to_folder(note_id: Uuid, folder_id: Option<Uuid>) -> Note => |s| s.move_note_to_folder(note_id, folder_id));
 
@@ -314,6 +315,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         create_folder,
         rename_folder,
         move_folder,
+        move_folder_to_vault,
         delete_folder,
         move_note_to_folder,
         backlinks,
@@ -374,11 +376,17 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         crate::assistant_cmds::assistant_chat,
         crate::assistant_cmds::assistant_cancel,
         crate::assistant_cmds::assistant_unload,
+        crate::theme_cmds::matugen_colors,
         crate::update::update_check,
         crate::update::update_install,
         crate::brain_cmds::brain_projects,
         crate::brain_cmds::agents_notes_access,
         crate::brain_cmds::agents_set_notes_access,
+        crate::brain_cmds::brain_hooks_status,
+        crate::brain_cmds::brain_install_hooks,
+        crate::brain_cmds::brain_remove_hooks,
+        crate::brain_cmds::agents_plan_access,
+        crate::brain_cmds::agents_set_plan_access,
         crate::brain_cmds::brain_memories,
         crate::brain_cmds::brain_set_reviewed,
         crate::brain_cmds::brain_forget,
@@ -388,6 +396,9 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         crate::brain_cmds::brain_stats,
         crate::brain_cmds::brain_graph,
         crate::brain_cmds::brain_setup,
+        crate::brain_cmds::brain_cloud_on,
+        crate::brain_cmds::brain_cloud_off,
+        crate::brain_cmds::brain_use_vault,
         crate::brain_cmds::brain_set_mirror,
         crate::brain_cmds::brain_skill_status,
         crate::brain_cmds::brain_install_skill,

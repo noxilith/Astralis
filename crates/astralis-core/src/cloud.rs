@@ -210,6 +210,11 @@ impl Store {
     }
 
     /// Forgets the cloud side of a vault on this device (the local vault stays).
+    /// Stops syncing a vault through the drive on this device (the vault and the Drive folder stay).
+    pub fn leave_cloud(&self, vault: Uuid) -> Result<()> {
+        self.forget_cloud_vault(vault)
+    }
+
     pub(crate) fn forget_cloud_vault(&self, vault: Uuid) -> Result<()> {
         for t in ["cloud_vaults", "cloud_seen", "cloud_invites"] {
             self.conn.execute(&format!("DELETE FROM {t} WHERE vault_id = ?1"), [vault.as_bytes()])?;

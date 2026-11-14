@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { EditorState, Compartment, type Extension } from '@codemirror/state'
+import { EditorState, Compartment, StateEffect, type Extension } from '@codemirror/state'
 import {
   Decoration,
   EditorView,
@@ -14,9 +14,11 @@ import {
   type ViewUpdate,
 } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
-import { searchKeymap, highlightSelectionMatches } from '@codemirror/search'
+import { searchKeymap, highlightSelectionMatches, search } from '@codemirror/search'
+import { findPanel } from '../lib/findPanel'
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, type CompletionContext } from '@codemirror/autocomplete'
-import { linter, lintKeymap, type Diagnostic } from '@codemirror/lint'
+import { linter, lintKeymap, forceLinting, forEachDiagnostic, type Diagnostic } from '@codemirror/lint'
+import { addIgnored, ignoredSpans, loadIgnored, onIgnoredChange } from '../lib/ignored'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { languages } from '@codemirror/language-data'
 import { HighlightStyle, syntaxHighlighting, syntaxTree, indentOnInput } from '@codemirror/language'
@@ -145,6 +147,71 @@ export interface EditorProps {
   onReady?: (view: EditorView | null) => void
 }
 
+/** Asks the grammar linter to run again. */
+const recheck = StateEffect.define<null>()
+
+/**
+ * Right-click on a flagged word or phrase (or on selected text): suggestions, and "Ignore" —
+ * remembered for every note, until removed in Settings. Returns whether it showed a menu (if not,
+ * the normal one appears).
+ */
+function ignoreMenu(e: MouseEvent, view: EditorView): boolean {
+  const pos = view.posAtCoords({ x: e.clientX, y: e.clientY })
+  if (pos == null) return false
+  let hit: { d: Diagnostic; from: number; to: number } | null = null
+  forEachDiagnostic(view.state, (d, from, to) => {
+    if (!hit && pos >= from && pos <= to) hit = { d, from, to }
+  })
+  const sel = view.state.selection.main
+  const picked = !sel.empty && pos >= sel.from && pos <= sel.to ? view.state.sliceDoc(sel.from, sel.to) : ''
+  const found = hit as { d: Diagnostic; from: number; to: number } | null
+  if (!found && !picked.trim()) return false
+
+  const backdrop = document.createElement('div')
+  backdrop.className = 'menu-backdrop'
+  const menu = document.createElement('div')
+  menu.className = 'menu'
+  menu.style.cssText = `position:fixed;right:auto;left:${Math.min(e.clientX, window.innerWidth - 250)}px;top:${Math.min(e.clientY, window.innerHeight - 260)}px;min-width:230px;max-width:320px`
+  const close = () => (backdrop.remove(), menu.remove(), document.removeEventListener('keydown', onKey, true))
+  const onKey = (k: KeyboardEvent) => k.key === 'Escape' && (k.stopPropagation(), close())
+  const add = (label: string, run: () => void, hint?: string) => {
+    const b = document.createElement('button')
+    b.textContent = label.length > 48 ? label.slice(0, 47) + '…' : label
+    if (hint) {
+      const h = document.createElement('span')
+      h.className = 'menu-hint'
+      h.textContent = hint
+      b.append(h)
+      b.style.flexDirection = 'column'
+      b.style.alignItems = 'flex-start'
+      b.style.gap = '0'
+    }
+    b.onclick = () => (close(), run())
+    menu.append(b)
+  }
+  const sep = () => menu.append(Object.assign(document.createElement('div'), { className: 'menu-sep' }))
+
+  if (found) {
+    const word = view.state.sliceDoc(found.from, found.to)
+    const msg = document.createElement('div')
+    msg.className = 'menu-label'
+    msg.textContent = found.d.message.length > 70 ? found.d.message.slice(0, 69) + '…' : found.d.message
+    menu.append(msg)
+    for (const a of (found.d.actions ?? []).slice(0, 4)) add(a.name, () => a.apply(view, found.from, found.to))
+    if (found.d.actions?.length) sep()
+    add(`Ignore “${word.trim()}”`, () => void addIgnored(word), 'Not flagged anywhere, in any note')
+  }
+  if (picked.trim() && (!found || picked !== view.state.sliceDoc(found.from, found.to))) {
+    if (found) sep()
+    add('Ignore grammar & spelling for selection', () => void addIgnored(picked), picked.trim().length > 40 ? picked.trim().slice(0, 39) + '…' : picked.trim())
+  }
+  document.addEventListener('keydown', onKey, true)
+  backdrop.onclick = close
+  backdrop.oncontextmenu = (ev) => (ev.preventDefault(), close())
+  document.body.append(backdrop, menu)
+  return true
+}
+
 /** Markdown editor with [[link]] autocomplete, Ctrl/Cmd-click to follow links, and offline grammar checks. */
 export function Editor({ value, vaultId = null, onChange, onOpenLink, session, grammar = true, placeholder, autoFocus, onReady }: EditorProps) {
   const host = useRef<HTMLDivElement>(null)
@@ -161,8 +228,11 @@ export function Editor({ value, vaultId = null, onChange, onOpenLink, session, g
       async (view): Promise<Diagnostic[]> => {
         const text = view.state.doc.toString()
         if (!text.trim()) return []
-        const issues = await api.checkGrammar(text).catch(() => [])
+        const [found, ignored] = await Promise.all([api.checkGrammar(text).catch(() => []), loadIgnored()])
         if (view.state.doc.toString() !== text) return []
+        // Nothing inside a word or sentence the user chose to ignore is flagged.
+        const spans = ignoredSpans(text, ignored)
+        const issues = found.filter((i) => !spans.some(([a, b]) => i.start >= a && i.end <= b))
         return issues.map((i) => ({
           from: i.start,
           to: Math.max(i.end, i.start + 1),
@@ -178,7 +248,8 @@ export function Editor({ value, vaultId = null, onChange, onOpenLink, session, g
           })),
         }))
       },
-      { delay: 1200 },
+      // Ignoring a word re-checks the note even though its text didn't change.
+      { delay: 1200, needsRefresh: (u) => u.transactions.some((t) => t.effects.some((e) => e.is(recheck))) },
     )
 
     const view = new EditorView({
@@ -193,6 +264,7 @@ export function Editor({ value, vaultId = null, onChange, onOpenLink, session, g
           indentOnInput(),
           closeBrackets(),
           highlightSelectionMatches(),
+          search({ top: true, createPanel: findPanel }),
           EditorView.lineWrapping,
           markdown({ base: markdownLanguage, codeLanguages: languages }),
           syntaxHighlighting(highlight),
@@ -219,6 +291,11 @@ export function Editor({ value, vaultId = null, onChange, onOpenLink, session, g
             cbs.current.onChange(u.state.doc.toString(), remote)
           }),
           EditorView.domEventHandlers({
+            contextmenu: (e, v) => {
+              const menu = ignoreMenu(e, v)
+              if (menu) e.preventDefault()
+              return menu
+            },
             mousedown: (e, v) => {
               if (!(e.ctrlKey || e.metaKey)) return false
               const pos = v.posAtCoords({ x: e.clientX, y: e.clientY })
@@ -252,9 +329,12 @@ export function Editor({ value, vaultId = null, onChange, onOpenLink, session, g
     })
     viewRef.current = view
     lintRef.current = grammarLinter
+    // Ignoring something (here or in Settings) re-checks the note right away.
+    const offIgnored = onIgnoredChange(() => (view.dispatch({ effects: recheck.of(null) }), forceLinting(view)))
     onReady?.(view)
     if (autoFocus) view.focus()
     return () => {
+      offIgnored()
       onReady?.(null)
       view.destroy()
     }

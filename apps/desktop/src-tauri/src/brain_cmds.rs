@@ -86,7 +86,7 @@ pub async fn brain_graph(state: S<'_>) -> Result<astralis_core::memory::BrainGra
 
 #[tauri::command]
 pub async fn brain_stats(state: S<'_>) -> Result<BrainStats> {
-    bg(&state, |s| s.brain_stats()).await
+    bg(&state, |s| s.brain_stats_report()).await
 }
 
 #[derive(serde::Serialize)]
@@ -165,10 +165,9 @@ pub fn spawn_outside_edits_watch(app: AppHandle, state: SharedState) {
             if seen.is_some_and(|v| v != version) {
                 if let Ok((ids, newest)) = bg(&state, move |s| s.notes_changed_since(since)).await {
                     since = newest;
-                    if !ids.is_empty() {
-                        let ids: Vec<String> = ids.into_iter().map(|i| i.to_string()).collect();
-                        let _ = app.emit("outside-edits", ids);
-                    }
+                    // Even with no note changed, tasks or calendar events may have (the lists reload).
+                    let ids: Vec<String> = ids.into_iter().map(|i| i.to_string()).collect();
+                    let _ = app.emit("outside-edits", ids);
                 }
             }
             seen = Some(version);
@@ -186,6 +185,18 @@ pub async fn agents_notes_access(state: S<'_>) -> Result<String> {
 pub async fn agents_set_notes_access(state: S<'_>, access: String) -> Result<()> {
     let a = astralis_core::agent_notes::AgentAccess::parse(&access).ok_or_else(|| Error::Invalid("access is edit, read or off".into()))?;
     bg(&state, move |s| s.set_agent_access(a)).await
+}
+
+/// What AI agents may do with the user's tasks, planners and calendar: "edit", "read" or "off".
+#[tauri::command]
+pub async fn agents_plan_access(state: S<'_>) -> Result<String> {
+    bg(&state, |s| Ok(s.agent_plan_access()?.as_str().to_string())).await
+}
+
+#[tauri::command]
+pub async fn agents_set_plan_access(state: S<'_>, access: String) -> Result<()> {
+    let a = astralis_core::agent_notes::AgentAccess::parse(&access).ok_or_else(|| Error::Invalid("access is edit, read or off".into()))?;
+    bg(&state, move |s| s.set_agent_plan_access(a)).await
 }
 
 // ---- the astralis-brain skill (teaches agents to use the Brain well) ----
@@ -247,4 +258,205 @@ pub fn brain_install_skill(target: String) -> Result<String> {
 #[tauri::command]
 pub fn brain_skill_text() -> String {
     SKILL.to_string()
+}
+
+/// Puts the Brain on Google Drive: its memories sync through the Drive, and your other devices
+/// can hook up to it (pair them, then share the Brain vault with them).
+#[tauri::command]
+pub async fn brain_cloud_on(state: S<'_>) -> Result<()> {
+    let vault = bg(&state, |s| s.brain_vault()).await?;
+    crate::cloud::cloud_enable(&state, vault, astralis_core::memory::BRAIN_VAULT_NAME).await
+}
+
+/// Stops syncing the Brain through the Drive on this device (the memories stay here).
+#[tauri::command]
+pub async fn brain_cloud_off(state: S<'_>) -> Result<()> {
+    let vault = bg(&state, |s| s.brain_vault()).await?;
+    state.store.lock().unwrap().leave_cloud(vault)
+}
+
+/// Uses a vault shared from your other device as this device's Brain.
+#[tauri::command]
+pub async fn brain_use_vault(state: S<'_>, vault_id: Uuid) -> Result<()> {
+    bg(&state, move |s| s.set_brain_vault(vault_id)).await
+}
+
+// ---- Claude Code hooks (so the Brain is used without the AI having to remember to ask) ----
+
+/// Claude Code's user settings file (it honours \`CLAUDE_CONFIG_DIR\`).
+fn claude_settings_path() -> Result<std::path::PathBuf> {
+    let base = std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from).or_else(|| home().map(|h| h.join(".claude")));
+    base.map(|b| b.join("settings.json")).ok_or_else(|| Error::Invalid("can't tell where Claude Code keeps its settings".into()))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HooksStatus {
+    /// The session-start and per-message hooks are in Claude Code's settings.
+    installed: bool,
+    /// The optional save reminder is too.
+    stop: bool,
+    path: String,
+}
+
+/// A command line for the hook, quoted so a path with spaces works in a shell (and on Windows).
+fn hook_command(server: &str, args: &[String], event: &str) -> String {
+    let q = |s: &str| if s.chars().all(|c| c.is_ascii_alphanumeric() || "/._:\\@+-".contains(c)) { s.to_string() } else { format!("\"{}\"", s.replace('"', "\\\"")) };
+    let mut parts = vec![q(server)];
+    parts.extend(args.iter().map(|a| q(a)));
+    parts.push("hook".into());
+    parts.push(event.into());
+    parts.join(" ")
+}
+
+/// Whether a hook entry is one of ours (it runs \`astralis-mcp … hook <something>\`).
+fn is_ours(entry: &serde_json::Value) -> bool {
+    entry["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| h["command"].as_str().is_some_and(|c| c.contains("astralis-mcp") && c.contains(" hook "))))
+}
+
+const HOOK_EVENTS: [(&str, &str); 3] = [("SessionStart", "session-start"), ("UserPromptSubmit", "prompt"), ("Stop", "stop")];
+
+/// Puts our hooks into a settings document, replacing earlier copies of ours and leaving
+/// everything else as it was. \`stop\`: also the save reminder (otherwise it's removed).
+fn merge_hooks(root: &mut serde_json::Value, server: &str, args: &[String], stop: bool) -> Result<()> {
+    use serde_json::json;
+    let obj = root.as_object_mut().ok_or_else(|| Error::Invalid("Claude Code's settings.json isn't a JSON object; fix it first".into()))?;
+    let hooks = obj.entry("hooks").or_insert_with(|| json!({}));
+    let hooks = hooks.as_object_mut().ok_or_else(|| Error::Invalid("the \"hooks\" part of Claude Code's settings.json isn't an object; fix it first".into()))?;
+    for (event, arg) in HOOK_EVENTS {
+        let list = hooks.entry(event).or_insert_with(|| json!([]));
+        let list = list.as_array_mut().ok_or_else(|| Error::Invalid(format!("\"hooks.{event}\" in Claude Code's settings.json isn't a list; fix it first")))?;
+        list.retain(|e| !is_ours(e));
+        if event != "Stop" || stop {
+            list.push(json!({ "hooks": [{ "type": "command", "command": hook_command(server, args, arg), "timeout": 10 }] }));
+        }
+        if list.is_empty() {
+            hooks.remove(event);
+        }
+    }
+    if hooks.is_empty() {
+        obj.remove("hooks");
+    }
+    Ok(())
+}
+
+fn hooks_status_of(root: &serde_json::Value, path: &std::path::Path) -> HooksStatus {
+    let has = |event: &str| root["hooks"][event].as_array().is_some_and(|l| l.iter().any(is_ours));
+    HooksStatus { installed: has("SessionStart") && has("UserPromptSubmit"), stop: has("Stop"), path: path.to_string_lossy().to_string() }
+}
+
+fn read_settings(path: &std::path::Path) -> Result<serde_json::Value> {
+    match std::fs::read_to_string(path) {
+        Ok(text) if text.trim().is_empty() => Ok(serde_json::json!({})),
+        Ok(text) => serde_json::from_str(&text).map_err(|e| Error::Invalid(format!("Claude Code's settings.json isn't valid JSON ({e}); fix it first, then try again"))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(serde_json::json!({})),
+        Err(e) => Err(Error::Invalid(format!("can't read {}: {e}", path.display()))),
+    }
+}
+
+/// Writes the settings back safely: the first time, the original is kept beside it as
+/// \`settings.json.astralis-backup\`, and the new file replaces the old in one step.
+fn write_settings(path: &std::path::Path, root: &serde_json::Value) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    if path.exists() {
+        let backup = path.with_extension("json.astralis-backup");
+        if !backup.exists() {
+            std::fs::copy(path, &backup)?;
+        }
+    }
+    let tmp = path.with_extension("json.astralis-tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(root).map_err(|e| Error::Invalid(e.to_string()))? + "\n")?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+fn mcp_server() -> Result<(String, Vec<String>)> {
+    let exe = std::env::current_exe().map_err(|e| Error::Invalid(e.to_string()))?;
+    let name = if cfg!(windows) { "astralis-mcp.exe" } else { "astralis-mcp" };
+    let server = exe.parent().map(|d| d.join(name)).unwrap_or_else(|| name.into());
+    let args = match std::env::var("ASTRALIS_PROFILE") {
+        Ok(p) if !p.is_empty() => vec!["--profile".to_string(), p],
+        _ => vec![],
+    };
+    Ok((server.to_string_lossy().to_string(), args))
+}
+
+#[tauri::command]
+pub fn brain_hooks_status() -> Result<HooksStatus> {
+    let path = claude_settings_path()?;
+    let root = read_settings(&path).unwrap_or_else(|_| serde_json::json!({}));
+    Ok(hooks_status_of(&root, &path))
+}
+
+/// Adds the Brain's hooks to Claude Code's settings (on the user's click in Brain → Connect).
+#[tauri::command]
+pub fn brain_install_hooks(stop: bool) -> Result<HooksStatus> {
+    let path = claude_settings_path()?;
+    let mut root = read_settings(&path)?;
+    let (server, args) = mcp_server()?;
+    merge_hooks(&mut root, &server, &args, stop)?;
+    write_settings(&path, &root)?;
+    Ok(hooks_status_of(&root, &path))
+}
+
+/// Takes the Brain's hooks out again, leaving every other setting alone.
+#[tauri::command]
+pub fn brain_remove_hooks() -> Result<HooksStatus> {
+    let path = claude_settings_path()?;
+    let mut root = read_settings(&path)?;
+    if root.get("hooks").is_some() {
+        // Merging with "stop off" re-adds the other two, so remove ours directly instead.
+        if let Some(hooks) = root.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+            for (event, _) in HOOK_EVENTS {
+                if let Some(list) = hooks.get_mut(event).and_then(|l| l.as_array_mut()) {
+                    list.retain(|e| !is_ours(e));
+                }
+                if hooks.get(event).and_then(|l| l.as_array()).is_some_and(|l| l.is_empty()) {
+                    hooks.remove(event);
+                }
+            }
+        }
+        if root["hooks"].as_object().is_some_and(|h| h.is_empty()) {
+            root.as_object_mut().map(|o| o.remove("hooks"));
+        }
+        write_settings(&path, &root)?;
+    }
+    Ok(hooks_status_of(&root, &path))
+}
+
+#[cfg(test)]
+mod hook_install_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn our_hooks_merge_in_without_touching_anything_else_and_can_be_replaced() {
+        let mut root = json!({
+            "model": "opus",
+            "hooks": { "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "echo hi" }] }],
+                       "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/other-tool" }] }] }
+        });
+        merge_hooks(&mut root, "/opt/Astralis App/astralis-mcp", &[], false).unwrap();
+        assert_eq!(root["model"], "opus");
+        assert_eq!(root["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        let submit = root["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(submit.len(), 2, "someone else's hook stays: {root}");
+        assert!(submit.iter().any(|e| e["hooks"][0]["command"] == "\"/opt/Astralis App/astralis-mcp\" hook prompt"));
+        assert!(root["hooks"]["Stop"].is_null());
+        assert!(hooks_status_of(&root, std::path::Path::new("x")).installed);
+        // Again, now with the save reminder: ours are replaced, not duplicated.
+        merge_hooks(&mut root, "/opt/Astralis App/astralis-mcp", &[], true).unwrap();
+        assert_eq!(root["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 2);
+        assert_eq!(root["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+        assert!(hooks_status_of(&root, std::path::Path::new("x")).stop);
+        // Odd files are refused, not overwritten.
+        assert!(merge_hooks(&mut json!([1]), "s", &[], false).is_err());
+        assert!(merge_hooks(&mut json!({ "hooks": "nope" }), "s", &[], false).is_err());
+        assert!(merge_hooks(&mut json!({ "hooks": { "Stop": 3 } }), "s", &[], false).is_err());
+        // A profile is passed along.
+        let cmd = hook_command("/x/astralis-mcp", &["--profile".into(), "work".into()], "prompt");
+        assert_eq!(cmd, "/x/astralis-mcp --profile work hook prompt");
+    }
 }

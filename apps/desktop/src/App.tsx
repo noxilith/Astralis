@@ -16,8 +16,9 @@ import { TemplatesView } from './views/TemplatesView'
 import { SettingsView } from './views/SettingsView'
 import { useStartupUpdateCheck } from './components/Updates'
 import { MINUTE } from './lib/time'
+import { useAppearance } from './lib/theme'
+import { applyNoteWidth, loadNoteWidth } from './lib/noteWidth'
 
-type Theme = 'dark' | 'light'
 
 function Shell() {
   const app = useApp()
@@ -35,10 +36,9 @@ function Shell() {
     window.addEventListener("astralis-error", onError)
     return () => window.removeEventListener("astralis-error", onError)
   }, [fail])
-  const [theme, setThemeState] = useState<Theme>('dark')
+  const { theme, setTheme, accent, setAccent, base: themeBase, matugen } = useAppearance()
 
   useEffect(() => {
-    api.getSetting('theme').then((t) => t && setThemeState(t as Theme)).catch(() => {})
     isPermissionGranted()
       .then(async (ok) => {
         if (!ok) await requestPermission()
@@ -46,14 +46,6 @@ function Shell() {
       .catch(() => {})
   }, [])
 
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme
-  }, [theme])
-
-  const setTheme = (t: Theme) => {
-    setThemeState(t)
-    api.setSetting('theme', t).catch(() => {})
-  }
 
   const newNote = useCallback(() => void createNote('note'), [createNote])
   const newWhiteboard = useCallback(() => void createNote('whiteboard'), [createNote])
@@ -103,12 +95,12 @@ function Shell() {
       <Sidebar />
       <main className="main">
         <div className="main-content">
-        {view === 'notes' && <NoteEditor theme={theme} />}
+        {view === 'notes' && <NoteEditor theme={themeBase} />}
         {(view === 'tasks' || view === 'calendar' || view === 'planners') && <Productivity view={view} />}
         {view === 'graph' && <GraphView />}
         {view === 'brain' && <BrainView />}
         {view === 'templates' && <TemplatesView />}
-        {view === 'settings' && <SettingsView theme={theme} setTheme={setTheme} />}
+        {view === 'settings' && <SettingsView theme={theme} setTheme={setTheme} accent={accent} setAccent={setAccent} matugenPath={matugen.path} matugenFound={!!matugen.colors} />}
         </div>
         <QuickNote />
       </main>

@@ -2,6 +2,7 @@ mod assistant_cmds;
 mod brain_cmds;
 mod cloud;
 mod commands;
+mod theme_cmds;
 pub mod update;
 
 use std::path::PathBuf;
@@ -128,7 +129,7 @@ pub fn run() {
                 assistant: Default::default(),
             });
             // One copy of the model for every profile.
-            let _ = state.assistant.dir.set(app.path().app_data_dir()?.join("models").join("phi-3-mini-4k"));
+            let _ = state.assistant.dir.set(app.path().app_data_dir()?.join("models").join("qwen2.5-1.5b"));
             assistant_cmds::spawn_idle_unload(state.clone());
             app.manage(state.clone());
             spawn_reminder_loop(app.handle().clone(), state.clone());
@@ -136,6 +137,7 @@ pub fn run() {
             cloud::spawn_sync_loop(app.handle().clone(), state.clone());
             brain_cmds::spawn_brain_watch(app.handle().clone(), state.clone());
             brain_cmds::spawn_outside_edits_watch(app.handle().clone(), state.clone());
+            theme_cmds::spawn_matugen_watch(app.handle().clone());
             spawn_p2p(app.handle().clone(), state, data_dir.join("device.key"));
             Ok(())
         })

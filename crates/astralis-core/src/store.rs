@@ -224,6 +224,8 @@ pub struct Store {
     pub(crate) vault_keys: HashMap<Uuid, Zeroizing<[u8; 32]>>,
     /// Sync state shared with the SQL change-tracking functions (clock, device id, apply flag).
     pub(crate) sync: Arc<SyncCtx>,
+    /// The Brain's search vectors per memory, kept while its text doesn't change (see `memory.rs`).
+    pub(crate) brain_vecs: HashMap<Uuid, crate::memory::MemVec>,
 }
 
 impl Store {
@@ -250,6 +252,7 @@ impl Store {
             conn,
             vault_keys: HashMap::new(),
             sync,
+            brain_vecs: HashMap::new(),
         };
         store.migrate()?;
         store.init_sync()?;

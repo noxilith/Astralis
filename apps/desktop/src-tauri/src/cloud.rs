@@ -167,6 +167,13 @@ pub async fn cloud_create_vault(state: S<'_>, name: String) -> Result<Vault> {
     astralis_cloud::create_cloud_vault(&d, &state.store, &name, &device, &device_name).await.map_err(err)
 }
 
+/// Puts one of the user's own plain vaults on the Drive (used for the Brain).
+pub async fn cloud_enable(state: &SharedState, vault: Uuid, name: &str) -> Result<()> {
+    let (device, device_name) = me(state)?;
+    let d = drive(state).await?;
+    astralis_cloud::make_cloud(&d, &state.store, vault, name, &device, &device_name).await.map_err(err)
+}
+
 #[tauri::command]
 pub fn cloud_invites(state: S<'_>, vault_id: Uuid) -> Result<Vec<CloudInvite>> {
     state.store.lock().unwrap().cloud_invites(vault_id)

@@ -69,9 +69,8 @@ Updates shows your version and lets you check any time.
     </td>
     <td width="50%" valign="top">
       <h3>🔥 Ask Astralis</h3>
-      A brutally honest AI for the note you're on. It tells you when an idea is bad, whether
-      it'll pay off, comes up with ideas, makes plans and writes the note. It runs entirely on
-      your computer.
+      A writing assistant for the note you're on. It rewrites, expands, shortens, fixes and
+      formats the note (or just what you've selected). It runs entirely on your computer.
     </td>
   </tr>
   <tr>
@@ -117,28 +116,25 @@ a planet to open the note.
 
 ## 🔥 Ask Astralis
 
-Open a note's side panel, switch to **Chat**, and talk to a local language model (Microsoft's
-Phi-3 mini on [llama.cpp](https://github.com/ggml-org/llama.cpp)) about it. It's built to be
-honest rather than nice:
+Open a note's side panel, switch to **Chat**, and let a local language model (Qwen2.5 1.5B on
+[llama.cpp](https://github.com/ggml-org/llama.cpp)) work on it. One click rewrites, expands, shortens,
+fixes or formats the note, or just the text you've selected, and you can type what you want too.
 
-> **You:** Should I make this?
->
-> **Astralis:** **Verdict:** Weak idea.<br>
-> **What's wrong with it:** No unique hook in a crowded genre, no shipped game yet, and an
-> unclear path to sales.<br>
-> **Will it pay off?** Not worth it yet: $500–3,000 and months of learning against an uncertain
-> return.<br>
-> **Should you do it?** Only if you test the core mechanic first. Build a one-week prototype.
-
-| Ask it to… | You get |
+| Job | What it does |
 |---|---|
-| **Be brutally honest** | A verdict, what's wrong with it, and whether to do it |
-| **Will it pay off?** | Realistic cost against realistic payoff, with a clear call |
-| **Give me ideas** | Ideas that fit, each with its competition and payoff, and a pick |
-| **Make a plan** | Scope, phases, milestones and a first step for today |
-| **Write it up** | The whole note rewritten. It can replace the note or be added to it, and it's undoable |
+| **Improve writing** | Clearer, better flow, same meaning |
+| **Expand** / **Shorten** | Develop each point, or cut it to half |
+| **Fix grammar** | Spelling and punctuation only, nothing else changes |
+| **Make it look better** | Headings, lists and emphasis, without changing the words |
+| **Professional** / **Casual tone** | Same facts, different voice |
+| **Make a checklist** | Turns the note into tasks you can tick off |
+| **Continue writing** / **Summarize** | New paragraphs, or the key points, added below |
+| **Suggest titles** / **Feedback** | Five title options, or what's unclear and what to cut |
 
-The model is a one-time 2.4 GB download. It loads on your first message and is freed when you
+Each reply can replace the note (or your selection) or be added below it, and it's undoable with
+`Ctrl`+`Z`. It never invents facts and keeps your `[[links]]` and images.
+
+The model is a one-time 1.1 GB download. It loads on your first message and is freed when you
 close the panel. It runs on the CPU; graphics-chip support (Vulkan, or Metal on macOS) is an
 early build option, `ASTRALIS_GPU=1 ./run.sh app`, then `ASTRALIS_LLM_GPU=1` to turn it on.
 
@@ -159,6 +155,17 @@ conventions, gotchas, a map of the code) plus a section about you.
 - Agents can also **work with your notes** when you ask: search, read, write, edit, move and
   delete notes, and organize folders, across your vaults (never encrypted ones). Every edit keeps the note's history, and you choose
   in Brain → Connect whether agents may edit, only read, or not touch your notes.
+- **It's built so agents stop digging through old chats.** Each project has a short **hand-off note**
+  ("where we left off") that leads the index, so the next session continues without reading the
+  last conversation. `brain_recall` finds memories by meaning (including everyday synonyms), and
+  `code_outline` / `code_find` show a file's definitions or where something is defined instead of
+  reading whole files.
+- **Hooks make it automatic** (Claude Code): **Brain → Connect → Install hooks** puts the index in
+  the AI's context when a session starts and adds memories that clearly match your message (once per
+  session, nothing when nothing matches). Your other settings are kept and the original is backed up.
+- It stays small and safe: memories are one idea each, near-duplicates are merged, old unused ones drop
+  out of the index, memories that mention deleted files are flagged, and anything that looks like a
+  key, token or password is refused.
 - Its graph is a rotatable 3D brain with each project in its own region.
 
 <br clear="right">

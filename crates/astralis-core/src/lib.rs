@@ -1,6 +1,7 @@
 //! Astralis core: UI-agnostic logic shared by the desktop app and future sync/CRDT layers.
 
 pub mod agent_notes;
+pub mod agent_plan;
 pub mod ai;
 pub mod attachments;
 pub mod calendar;

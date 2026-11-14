@@ -150,14 +150,19 @@ export interface Memory {
 }
 export interface BrainGraph { nodes: Memory[]; links: { a: Id; b: Id; strength: number }[] }
 export interface BrainProject { folder: Id; name: string; count: number; newCount: number }
-export interface BrainStats { recalls: number; tokensServed: number; tokensSaved: number }
+export interface HooksStatus { installed: boolean; stop: boolean; path: string }
+export interface BrainStats { recalls: number; tokensServed: number; tokensSaved: number; hits: number; misses: number; memories: number; used: number }
 export interface TidyPair { a: Id; b: Id; aHook: string; bHook: string; score: number }
 export interface TidyReport { duplicates: TidyPair[]; similar: TidyPair[]; stale: Id[] }
 export interface SkillStatus { target: 'claude' | 'codex'; path: string; state: 'missing' | 'installed' | 'outdated' }
 export interface BrainSetup { server: string; serverExists: boolean; args: string[]; mirror: string | null; vault: Id }
 export interface ChatTurn { role: 'user' | 'assistant'; text: string }
+/** What matugen's template writes (see lib/theme.ts). */
+export interface MatugenColors { mode?: 'dark' | 'light'; bg?: string; elev?: string; elev2?: string; hover?: string; active?: string; border?: string; borderStrong?: string; text?: string; muted?: string; faint?: string; accent?: string; danger?: string }
 export interface UpdateInfo { current: string; latest: string | null; canInstall: boolean; install: string; notes: string; page: string; size: number }
-export interface AssistantStatus { ready: boolean; downloading: boolean; loaded: boolean; quickPrompts: [string, string][] }
+export type AssistantOutput = 'rewrite' | 'insert' | 'answer'
+export interface AssistantAction { id: string; label: string; hint: string; group: string; output: AssistantOutput }
+export interface AssistantStatus { ready: boolean; downloading: boolean; loaded: boolean; actions: AssistantAction[] }
 export interface GoogleStatus { configured: boolean; builtin: boolean; clientId: string | null; email: string | null }
 export interface CloudInvite { email: string; acceptedBy: string | null }
 
@@ -202,6 +207,7 @@ export const api = {
   createFolder: (vaultId: Id | null, parentId: Id | null, name: string) => call<Folder>('create_folder', { vaultId, parentId, name }),
   renameFolder: (id: Id, name: string) => call<Folder>('rename_folder', { id, name }),
   moveFolder: (id: Id, parentId: Id | null) => call<Folder>('move_folder', { id, parentId }),
+  moveFolderToVault: (id: Id, from: Id, to: Id) => call<Id>('move_folder_to_vault', { id, from, to }),
   deleteFolder: (id: Id) => call<void>('delete_folder', { id }),
   moveNoteToFolder: (noteId: Id, folderId: Id | null) => call<Note>('move_note_to_folder', { noteId, folderId }),
 
@@ -284,7 +290,10 @@ export const api = {
   openUrl: (url: string) => call<void>('open_url', { url }),
   /** What AI agents (through the Brain's MCP server) may do with the user's notes. */
   agentsNotesAccess: () => call<'edit' | 'read' | 'off'>('agents_notes_access'),
+  agentsPlanAccess: () => call<'edit' | 'read' | 'off'>('agents_plan_access'),
+  agentsSetPlanAccess: (access: 'edit' | 'read' | 'off') => call<void>('agents_set_plan_access', { access }),
   agentsSetNotesAccess: (access: 'edit' | 'read' | 'off') => call<void>('agents_set_notes_access', { access }),
+  matugenColors: () => call<{ path: string; json: string | null }>('matugen_colors'),
   updateCheck: () => call<UpdateInfo>('update_check'),
   /** Downloads and installs the newest release; on success the app restarts. */
   updateInstall: () => call<void>('update_install'),
@@ -292,8 +301,8 @@ export const api = {
   // Ask Astralis (the local writing model)
   assistantStatus: () => call<AssistantStatus>('assistant_status'),
   assistantDownload: () => call<void>('assistant_download'),
-  assistantChat: (requestId: string, noteId: Id, history: ChatTurn[], message: string) =>
-    call<string>('assistant_chat', { requestId, noteId, history, message }),
+  assistantChat: (requestId: string, noteId: Id, history: ChatTurn[], action: string | null, message: string, selection: string | null) =>
+    call<string>('assistant_chat', { requestId, noteId, history, action, message, selection }),
   assistantCancel: (requestId: string) => call<void>('assistant_cancel', { requestId }),
   assistantUnload: () => call<void>('assistant_unload'),
 
@@ -308,6 +317,12 @@ export const api = {
   brainStats: () => call<BrainStats>('brain_stats'),
   brainGraph: () => call<BrainGraph>('brain_graph'),
   brainSetup: () => call<BrainSetup>('brain_setup'),
+  brainHooksStatus: () => call<HooksStatus>('brain_hooks_status'),
+  brainInstallHooks: (stop: boolean) => call<HooksStatus>('brain_install_hooks', { stop }),
+  brainRemoveHooks: () => call<HooksStatus>('brain_remove_hooks'),
+  brainCloudOn: () => call<void>('brain_cloud_on'),
+  brainCloudOff: () => call<void>('brain_cloud_off'),
+  brainUseVault: (vaultId: Id) => call<void>('brain_use_vault', { vaultId }),
   brainSetMirror: (enabled: boolean, dir: string | null) => call<string | null>('brain_set_mirror', { enabled, dir }),
   brainSkillStatus: () => call<SkillStatus[]>('brain_skill_status'),
   brainInstallSkill: (target: 'claude' | 'codex') => call<string>('brain_install_skill', { target }),

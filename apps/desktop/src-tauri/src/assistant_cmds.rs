@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use astralis_cloud::reqwest;
-use astralis_core::ai::assistant::{ChatTurn, QUICK_PROMPTS, build_prompt, clean_reply};
+use astralis_core::ai::assistant::{ACTIONS, ChatTurn, Output, Request, build_prompt, clean_reply};
 use astralis_core::ai::llm::{self, Llm};
 use astralis_core::{Error, Result};
 use tauri::{AppHandle, Emitter, State};
@@ -46,7 +46,17 @@ pub struct AssistantStatus {
     downloading: bool,
     /// Loaded in memory (replies start right away).
     loaded: bool,
-    quick_prompts: Vec<(String, String)>,
+    actions: Vec<ActionInfo>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionInfo {
+    id: &'static str,
+    label: &'static str,
+    hint: &'static str,
+    group: &'static str,
+    output: Output,
 }
 
 #[tauri::command]
@@ -57,7 +67,7 @@ pub fn assistant_status(state: S<'_>) -> Result<AssistantStatus> {
         downloading: state.assistant.downloading.load(Ordering::SeqCst),
         // Peek only: while a reply is being written the model is busy (and loaded).
         loaded: state.assistant.model.try_lock().map(|m| m.is_some()).unwrap_or(true),
-        quick_prompts: QUICK_PROMPTS.iter().map(|(a, b, _)| (a.to_string(), b.to_string())).collect(),
+        actions: ACTIONS.iter().map(|a| ActionInfo { id: a.id, label: a.label, hint: a.hint, group: a.group, output: a.output }).collect(),
     })
 }
 
@@ -125,16 +135,26 @@ struct Token {
     text: String,
 }
 
-/// Asks the assistant about a note. Streams the reply as `assistant-token` events and returns it.
+/// Works on a note (or the selected part of it): an action, or a typed request. Streams the reply
+/// as `assistant-token` events and returns it.
 #[tauri::command]
-pub async fn assistant_chat(app: AppHandle, state: S<'_>, request_id: String, note_id: Uuid, history: Vec<ChatTurn>, message: String) -> Result<String> {
+pub async fn assistant_chat(
+    app: AppHandle,
+    state: S<'_>,
+    request_id: String,
+    note_id: Uuid,
+    history: Vec<ChatTurn>,
+    action: Option<String>,
+    message: String,
+    selection: Option<String>,
+) -> Result<String> {
     let st = state.inner().clone();
     let cancel = Arc::new(AtomicBool::new(false));
     st.assistant.cancels.lock().unwrap().insert(request_id.clone(), cancel.clone());
     let id = request_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<String> {
         let note = st.store.lock().unwrap().get_note(note_id)?;
-        let prompt = build_prompt(&note.title, &note.body, &history, &message, PROMPT_BUDGET);
+        let (prompt, _) = build_prompt(&note.title, &note.body, &history, &Request { action, message, selection }, PROMPT_BUDGET).map_err(Error::Invalid)?;
         let dir = dir(&st)?;
         let mut slot = st.assistant.model.lock().unwrap();
         if slot.is_none() {

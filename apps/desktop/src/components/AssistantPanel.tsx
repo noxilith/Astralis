@@ -1,45 +1,57 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { ArrowUp, Copy, Cpu, Download, FilePlus2, Flame, Lightbulb, ListChecks, type LucideIcon, PenLine, Replace, Sparkles, Square, SquarePen, TrendingUp } from 'lucide-react'
-import { api, type AssistantStatus, type ChatTurn, type Note } from '../api'
+import {
+  AlignLeft, ArrowUp, ArrowDownToLine, BookOpenCheck, Briefcase, Copy, Cpu, Download, FileText, ListChecks, type LucideIcon, MessageSquareText, Minimize2, Maximize2, PenLine,
+  Replace, Smile, Sparkles, SpellCheck, Square, SquarePen, Type, Wand2,
+} from 'lucide-react'
+import { api, type AssistantAction, type AssistantOutput, type AssistantStatus, type ChatTurn, type Note } from '../api'
 import { useApp } from '../context'
 import { Markdown } from './Markdown'
+import { useAssistantProfile } from '../lib/assistantProfile'
 
 interface Message extends ChatTurn {
   /** Still being written. */
   streaming?: boolean
   /** Loading the model before the first word. */
   warming?: boolean
+  /** What the reply is for (decides the buttons under it). */
+  output?: AssistantOutput
+  /** The selected text it worked on (if any), so the reply goes back to the right place. */
+  target?: string
 }
 
 // Conversations per note, kept while the app is open.
 const chats = new Map<string, Message[]>()
 
-/** How each quick prompt looks (by its label). */
-const QUICK_LOOK: Record<string, { icon: LucideIcon; hint: string; tone: string }> = {
-  'Be brutally honest': { icon: Flame, hint: "What's wrong with it", tone: 'red' },
-  'Will it pay off?': { icon: TrendingUp, hint: 'Cost against payoff', tone: 'green' },
-  'Make a plan': { icon: ListChecks, hint: 'Phases and a first step', tone: 'blue' },
-  'Write it up': { icon: PenLine, hint: 'Turn it into a clean note', tone: 'violet' },
-  'Give me ideas': { icon: Lightbulb, hint: 'Ideas worth building', tone: 'amber' },
+/** How each action looks (by id). */
+const LOOK: Record<string, { icon: LucideIcon; tone: string }> = {
+  improve: { icon: Wand2, tone: 'violet' },
+  expand: { icon: Maximize2, tone: 'blue' },
+  shorten: { icon: Minimize2, tone: 'amber' },
+  grammar: { icon: SpellCheck, tone: 'green' },
+  format: { icon: AlignLeft, tone: 'violet' },
+  professional: { icon: Briefcase, tone: 'blue' },
+  casual: { icon: Smile, tone: 'amber' },
+  checklist: { icon: ListChecks, tone: 'green' },
+  continue: { icon: PenLine, tone: 'violet' },
+  summarize: { icon: FileText, tone: 'blue' },
+  titles: { icon: Type, tone: 'amber' },
+  feedback: { icon: BookOpenCheck, tone: 'red' },
 }
-const look = (label: string) => QUICK_LOOK[label] ?? { icon: Sparkles, hint: '', tone: 'violet' }
-
-/** A reply that opens with "**Verdict:** …" or "**ROI verdict:** …" gets that shown as a banner. */
-function splitVerdict(text: string): { kind: string; verdict: string; tone: string; rest: string } | null {
-  const m = /^\s*\*\*((?:ROI )?verdict):?\*\*:?\s*(.+?)\s*(?:\n|$)/i.exec(text)
-  if (!m) return null
-  const verdict = m[2].replace(/\*\*/g, '')
-  const v = verdict.toLowerCase()
-  const tone = /^(bad|not worth|no\b)/.test(v) ? 'bad' : /^(good|worth it|yes\b|strong)/.test(v) ? 'good' : 'meh'
-  return { kind: /roi/i.test(m[1]) ? 'Return on investment' : 'Verdict', verdict, tone, rest: text.slice(m[0].length).trim() }
-}
+const look = (id: string) => LOOK[id] ?? { icon: Sparkles, tone: 'violet' }
 
 /** The AI writes Markdown, never HTML: text like "<your app>" is shown as written instead of being
  *  read as a tag (which can hide the rest of the answer). Code blocks are left alone. */
 const asText = (md: string) => md.split(/(```[\s\S]*?(?:```|$))/).map((part, i) => (i % 2 ? part : part.replace(/<(?=[A-Za-z/!?])/g, '&lt;'))).join('')
 
+const snippet = (s: string, n = 60) => {
+  const t = s.replace(/\s+/g, ' ').trim()
+  return t.length > n ? t.slice(0, n - 1) + '…' : t
+}
+
 function Orb({ size = 28, busy = false }: { size?: number; busy?: boolean }) {
+  const { avatar } = useAssistantProfile()
+  if (avatar) return <img className={'assistant-orb avatar' + (busy ? ' busy' : '')} style={{ width: size, height: size }} src={avatar} alt="" />
   return (
     <span className={'assistant-orb' + (busy ? ' busy' : '')} style={{ width: size, height: size }}>
       <Sparkles size={Math.round(size * 0.5)} />
@@ -47,40 +59,35 @@ function Orb({ size = 28, busy = false }: { size?: number; busy?: boolean }) {
   )
 }
 
-function Reply({ m, onReplace, onAppend, onCopy }: { m: Message; onReplace: () => void; onAppend: () => void; onCopy: () => void }) {
-  if (m.warming && !m.text) {
-    return (
-      <div className="assistant-thinking">
-        <span className="assistant-dots"><i /><i /><i /></span> Waking up the model…
-      </div>
-    )
-  }
+type Apply = (text: string, mode: 'replace' | 'after', target?: string) => void
+
+function Reply({ m, apply, onCopy }: { m: Message; apply: Apply; onCopy: () => void }) {
   if (!m.text) {
     return (
       <div className="assistant-thinking">
-        <span className="assistant-dots"><i /><i /><i /></span> Thinking…
+        <span className="assistant-dots"><i /><i /><i /></span> {m.warming ? 'Waking up the model…' : 'Writing…'}
       </div>
     )
   }
-  const v = splitVerdict(m.text)
+  const scope = m.target ? 'selection' : 'note'
   return (
     <>
       <div className={'assistant-card' + (m.streaming ? ' streaming' : '')}>
-        {v && (
-          <div className={'assistant-verdict ' + v.tone}>
-            <span className="assistant-verdict-kind">{v.kind}</span>
-            <span className="assistant-verdict-text">{v.verdict}</span>
-          </div>
-        )}
-        <Markdown source={asText(v ? v.rest : m.text)} />
+        <Markdown source={asText(m.text)} />
       </div>
       {!m.streaming && (
         <div className="assistant-actions">
-          <button className="assistant-action" title="Replace the note with this (undo with Ctrl+Z)" onClick={onReplace}>
-            <Replace size={12} /> Replace note
-          </button>
-          <button className="assistant-action" title="Add this to the end of the note" onClick={onAppend}>
-            <FilePlus2 size={12} /> Add to note
+          {m.output === 'rewrite' && (
+            <button className="assistant-action primary" title={`Put this in place of the ${scope} (undo with Ctrl+Z)`} onClick={() => apply(m.text, 'replace', m.target)}>
+              <Replace size={12} /> Replace {scope}
+            </button>
+          )}
+          <button
+            className={'assistant-action' + (m.output === 'insert' ? ' primary' : '')}
+            title={m.target ? 'Add this below the selection' : 'Add this to the end of the note'}
+            onClick={() => apply(m.text, 'after', m.target)}
+          >
+            <ArrowDownToLine size={12} /> {m.output === 'insert' ? 'Add to note' : 'Add below'}
           </button>
           <button className="assistant-action icon" title="Copy" onClick={onCopy}>
             <Copy size={12} />
@@ -91,19 +98,38 @@ function Reply({ m, onReplace, onAppend, onCopy }: { m: Message; onReplace: () =
   )
 }
 
-/** "Ask Astralis": talk to the local AI about the open note, or have it write the note. */
-export function AssistantPanel({ note, onReplace, onAppend }: { note: Note; onReplace: (text: string) => void; onAppend: (text: string) => void }) {
+/**
+ * "Ask Astralis": the assistant for the open note. One click rewrites, expands, shortens, fixes or
+ * formats it (or just the text you've selected), or type what you want. Replies can be put into
+ * the note with a click. Runs on this device.
+ */
+export function AssistantPanel({
+  note,
+  getSelection,
+  onApply,
+}: {
+  note: Note
+  getSelection: () => string
+  onApply: Apply
+}) {
   const { fail, toast } = useApp()
+  const { name } = useAssistantProfile()
   const [status, setStatus] = useState<AssistantStatus | null>(null)
   const [messages, setMessages] = useState<Message[]>(() => chats.get(note.id) ?? [])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
+  const [selection, setSelection] = useState('')
   const [progress, setProgress] = useState<{ file: string; done: number; total: number | null } | null>(null)
   const scroller = useRef<HTMLDivElement>(null)
   const box = useRef<HTMLTextAreaElement>(null)
 
   const refresh = useCallback(() => api.assistantStatus().then(setStatus).catch(() => {}), [])
   useEffect(() => void refresh(), [refresh])
+  // What's selected in the note (it keeps its selection while you click here).
+  useEffect(() => {
+    const t = window.setInterval(() => setSelection((s) => (getSelection() === s ? s : getSelection())), 400)
+    return () => window.clearInterval(t)
+  }, [getSelection])
   useEffect(() => {
     chats.set(note.id, messages)
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'smooth' })
@@ -132,19 +158,29 @@ export function AssistantPanel({ note, onReplace, onAppend }: { note: Note; onRe
     }
   }, [busy])
 
-  const send = async (text: string) => {
-    const message = text.trim()
-    if (!message || busy) return
+  /** Runs an action (with whatever is typed as extra wishes) or a typed request. */
+  const run = async (action: AssistantAction | null, typed: string) => {
+    const message = typed.trim()
+    if ((!action && !message) || busy) return
+    const target = getSelection().trim()
     const history: ChatTurn[] = messages.filter((m) => !m.streaming).map(({ role, text }) => ({ role, text }))
     const id = crypto.randomUUID()
+    const label = action ? (message ? `${action.label} — ${message}` : action.label) : message
     setInput('')
     setBusy(id)
-    setMessages((ms) => [...ms, { role: 'user', text: message }, { role: 'assistant', text: '', streaming: true, warming: !status?.loaded }])
+    setMessages((ms) => [
+      ...ms,
+      { role: 'user', text: label, target: target || undefined },
+      { role: 'assistant', text: '', streaming: true, warming: !status?.loaded, output: action?.output, target: target || undefined },
+    ])
     try {
-      const reply = await api.assistantChat(id, note.id, history, message)
-      setMessages((ms) => [...ms.slice(0, -1), { role: 'assistant', text: reply }])
+      const reply = await api.assistantChat(id, note.id, history, action?.id ?? null, message, target || null)
+      setMessages((ms) => {
+        const last = ms[ms.length - 1]
+        return [...ms.slice(0, -1), { ...last, text: reply, streaming: false, warming: false }]
+      })
     } catch (e) {
-      setMessages((ms) => ms.slice(0, -1))
+      setMessages((ms) => ms.slice(0, -2))
       fail(e)
     } finally {
       setBusy(null)
@@ -170,7 +206,7 @@ export function AssistantPanel({ note, onReplace, onAppend }: { note: Note; onRe
     <div className="assistant-head">
       <Orb size={30} busy={!!busy} />
       <div className="assistant-title">
-        <span>Ask Astralis</span>
+        <span>{name === 'Astralis' ? 'Ask Astralis' : name}</span>
         <span className="assistant-sub">
           <i className={'assistant-led' + (status?.ready ? (status.loaded ? ' on' : ' idle') : '')} />
           {!status?.ready ? 'Not set up' : busy ? 'Writing…' : status.loaded ? 'Ready · on this device' : 'Getting ready…'}
@@ -194,15 +230,18 @@ export function AssistantPanel({ note, onReplace, onAppend }: { note: Note; onRe
         {head}
         <div className="assistant-setup">
           <Orb size={56} />
-          <h3>Your own AI, right in your notes</h3>
-          <p className="muted">Talk about the note you're on, or tell it what the note should be.</p>
+          <h3>{name === 'Astralis' ? 'Your writing assistant' : `Meet ${name}`}</h3>
+          <p className="muted">Works on the note you're on: rewrite it, expand it, fix it, make it look better.</p>
           <ul className="assistant-features">
-            {Object.entries(QUICK_LOOK).map(([label, { icon: Icon, hint, tone }]) => (
-              <li key={label}>
-                <span className={'assistant-tile ' + tone}><Icon size={14} /></span>
-                <span><b>{label}</b><small>{hint}</small></span>
-              </li>
-            ))}
+            {status.actions.slice(0, 6).map((a) => {
+              const { icon: Icon, tone } = look(a.id)
+              return (
+                <li key={a.id}>
+                  <span className={'assistant-tile ' + tone}><Icon size={14} /></span>
+                  <span><b>{a.label}</b><small>{a.hint}</small></span>
+                </li>
+              )
+            })}
           </ul>
           <div className="assistant-private">
             <Cpu size={14} /> Runs on this computer: nothing leaves your device and it uses no Claude tokens.
@@ -220,53 +259,58 @@ export function AssistantPanel({ note, onReplace, onAppend }: { note: Note; onRe
             </div>
           ) : (
             <button className="btn primary assistant-download" onClick={download} disabled={status.downloading}>
-              <Download size={15} /> Download the model · 2.4 GB
+              <Download size={15} /> Download the model · 1.1 GB
             </button>
           )}
-          <p className="small faint">One-time download of Microsoft's Phi-3 mini.</p>
+          <p className="small faint">One-time download of Alibaba's Qwen2.5 1.5B (Apache-2.0).</p>
         </div>
       </div>
     )
   }
+
+  const groups = ['Rewrite', 'Create', 'Ask'].map((g) => [g, status.actions.filter((a) => a.group === g)] as const).filter(([, list]) => list.length)
 
   return (
     <div className="assistant">
       {head}
       <div className="assistant-log" ref={scroller}>
         {messages.length === 0 ? (
-          <div className="assistant-welcome">
-            <Orb size={52} />
-            <h3>What should we do with “{note.title || 'this note'}”?</h3>
-            <p className="muted">I'll be honest, even when it's not what you want to hear.</p>
-            <div className="assistant-cards">
-              {status.quickPrompts.map(([label, prompt]) => {
-                const { icon: Icon, hint, tone } = look(label)
-                return (
-                  <button key={label} className="assistant-quick-card" onClick={() => send(prompt)}>
-                    <span className={'assistant-tile ' + tone}><Icon size={15} /></span>
-                    <b>{label}</b>
-                    <small>{hint}</small>
-                  </button>
-                )
-              })}
-            </div>
+          <div className="assistant-welcome notes">
+            <Orb size={44} />
+            <h3>{selection ? 'Work on the selected text' : `What should we do with “${note.title || 'this note'}”?`}</h3>
+            <p className="muted">{selection ? 'Pick what to do with it.' : 'Pick a job, or type what you want. Select part of the note to work on just that.'}</p>
+            {groups.map(([group, list]) => (
+              <div key={group} className="assistant-group">
+                <div className="assistant-group-title">{group}</div>
+                <div className="assistant-cards">
+                  {list.map((a) => {
+                    const { icon: Icon, tone } = look(a.id)
+                    return (
+                      <button key={a.id} className="assistant-quick-card" onClick={() => run(a, input)}>
+                        <span className={'assistant-tile ' + tone}><Icon size={15} /></span>
+                        <b>{a.label}</b>
+                        <small>{a.hint}</small>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            ))}
           </div>
         ) : (
           messages.map((m, i) =>
             m.role === 'user' ? (
               <div key={i} className="assistant-msg mine">
-                <div className="assistant-bubble">{m.text}</div>
+                <div className="assistant-bubble">
+                  {m.text}
+                  {m.target && <span className="assistant-bubble-sel">on “{snippet(m.target, 40)}”</span>}
+                </div>
               </div>
             ) : (
               <div key={i} className="assistant-msg ai">
                 <Orb size={24} busy={m.streaming} />
                 <div className="assistant-body">
-                  <Reply
-                    m={m}
-                    onReplace={() => onReplace(m.text)}
-                    onAppend={() => onAppend(m.text)}
-                    onCopy={() => navigator.clipboard?.writeText(m.text).then(() => toast('Copied'))}
-                  />
+                  <Reply m={m} apply={onApply} onCopy={() => navigator.clipboard?.writeText(m.text).then(() => toast('Copied'))} />
                 </div>
               </div>
             ),
@@ -276,28 +320,33 @@ export function AssistantPanel({ note, onReplace, onAppend }: { note: Note; onRe
       <div className="assistant-foot">
         {messages.length > 0 && !busy && (
           <div className="assistant-chips">
-            {status.quickPrompts.map(([label, prompt]) => {
-              const { icon: Icon, tone } = look(label)
+            {status.actions.map((a) => {
+              const { icon: Icon, tone } = look(a.id)
               return (
-                <button key={label} className={'assistant-chip ' + tone} onClick={() => send(prompt)}>
-                  <Icon size={12} /> {label}
+                <button key={a.id} className={'assistant-chip ' + tone} onClick={() => run(a, input)}>
+                  <Icon size={12} /> {a.label}
                 </button>
               )
             })}
+          </div>
+        )}
+        {selection.trim() && (
+          <div className="assistant-selection" title={selection}>
+            <MessageSquareText size={12} /> Working on the selection: “{snippet(selection)}”
           </div>
         )}
         <div className={'assistant-composer' + (busy ? ' busy' : '')}>
           <textarea
             ref={box}
             rows={1}
-            placeholder={busy ? 'Writing…' : 'Ask, or say what this note should be…'}
+            placeholder={busy ? 'Writing…' : selection.trim() ? 'What should I do with the selection?' : 'Tell me what to change, or ask about the note…'}
             value={input}
             disabled={!!busy}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
-                send(input)
+                run(null, input)
               }
             }}
           />
@@ -306,12 +355,12 @@ export function AssistantPanel({ note, onReplace, onAppend }: { note: Note; onRe
               <Square size={12} fill="currentColor" />
             </button>
           ) : (
-            <button className="assistant-send" title="Send (Enter)" disabled={!input.trim()} onClick={() => send(input)}>
+            <button className="assistant-send" title="Send (Enter)" disabled={!input.trim()} onClick={() => run(null, input)}>
               <ArrowUp size={15} />
             </button>
           )}
         </div>
-        <div className="assistant-hint">Enter to send · Shift+Enter for a new line</div>
+        <div className="assistant-hint">Enter to send · typing before a job adds your own wishes to it</div>
       </div>
     </div>
   )

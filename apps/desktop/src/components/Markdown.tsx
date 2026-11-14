@@ -10,6 +10,9 @@ const escapeHtml = (s: string) =>
 
 // Counts repeated uses of the same image so a resize can find the right one in the source.
 let occurrences = new Map<string, number>()
+// Numbers the `- [ ]` items in the order they appear, so a click can find its line in the source.
+let taskCount = 0
+let tasksToggle = false
 
 const md = new Marked({ gfm: true, breaks: true, async: false }).use({
   renderer: {
@@ -17,6 +20,14 @@ const md = new Marked({ gfm: true, breaks: true, async: false }).use({
       const language = (lang ?? "").trim().split(/\s+/)[0]
       const label = language ? `<span class="code-lang">${escapeHtml(language)}</span>` : ""
       return `<div class="code-block">${label}<pre><code data-lang="${escapeHtml(language)}">${escapeHtml(text)}</code></pre></div>`
+    },
+    // Task items get a class (the checkbox takes the place of the bullet) — no :has() needed.
+    listitem(this: { parser: { parse(t: Tokens.Generic[]): string } }, item: Tokens.ListItem) {
+      const body = this.parser.parse(item.tokens)
+      return `<li${body.slice(0, 160).includes('class="md-check"') ? ' class="task-item' + (item.checked ? ' done' : '') + '"' : ''}>${body}</li>\n`
+    },
+    checkbox({ checked }: Tokens.Checkbox) {
+      return `<input type="checkbox" class="md-check" data-task="${taskCount++}"${checked ? ' checked' : ''}${tasksToggle ? '' : ' disabled'}>`
     },
     image({ href, text }: Tokens.Image) {
       const { alt, width } = splitAlt(text)
@@ -41,10 +52,13 @@ export function Markdown({
   source,
   onOpenLink,
   onResizeImage,
+  onToggleTask,
 }: {
   source: string
   onOpenLink?: (title: string) => void
   onResizeImage?: (src: string, occurrence: number, width: number) => void
+  /** Makes the checkboxes clickable: the n-th task in the source was ticked or unticked. */
+  onToggleTask?: (index: number, checked: boolean) => void
 }) {
   const root = useRef<HTMLDivElement>(null)
   const html = useMemo(() => {
@@ -55,9 +69,12 @@ export function Markdown({
       return `<a class="wikilink" data-wikilink="${escapeHtml(target)}">${escapeHtml(label)}</a>`
     })
     occurrences = new Map()
+    taskCount = 0
+    tasksToggle = !!onToggleTask
     const raw = md.parse(withLinks) as string
-    return DOMPurify.sanitize(raw, { ADD_ATTR: ["data-wikilink", "data-attachment", "data-src", "data-occ", "data-lang"] })
-  }, [source])
+    return DOMPurify.sanitize(raw, { ADD_ATTR: ["data-wikilink", "data-attachment", "data-src", "data-occ", "data-lang", "data-task"] })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source, !!onToggleTask])
 
   // Color code blocks by their language.
   useEffect(() => {
@@ -126,6 +143,13 @@ export function Markdown({
         handle.addEventListener('pointerup', up)
       }}
       onClick={(e) => {
+        const box = e.target as HTMLInputElement
+        if (onToggleTask && box.classList?.contains('md-check')) {
+          // The note is rewritten and re-rendered from its text, so let the source decide the box.
+          e.preventDefault()
+          onToggleTask(Number(box.dataset.task), box.checked) // already flipped while the click is handled
+          return
+        }
         const a = (e.target as HTMLElement).closest('a')
         if (!a) return
         const target = a.getAttribute('data-wikilink')

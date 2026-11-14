@@ -7,16 +7,27 @@ description: How to use the Astralis Brain (astralis-brain MCP tools), this proj
 
 The Brain is long-term memory shared by every session and every AI tool the user works with (Claude Code, Codex, Cursor…). It exists to **save tokens**: a small, targeted answer from the Brain replaces re-reading files, grepping, and re-asking the user. Treat it like a sharp colleague's notebook: check it first, keep it accurate, and keep it short.
 
-Tools (from the `astralis-brain` MCP server): `brain_context`, `brain_recall`, `brain_read`, `brain_map`, `brain_remember`, `brain_update`, `brain_forget`, `brain_map_note`.
+Tools (from the `astralis-brain` MCP server): `brain_context`, `brain_recall`, `brain_read`, `brain_map`, `brain_remember`, `brain_update`, `brain_forget`, `brain_map_note`, `brain_handoff`, and for navigating code without reading whole files, `code_outline` and `code_find`.
+
+## The rule: the Brain, never the old chats
+
+Never search or read earlier chat logs, session transcripts or history files (for example `~/.claude/projects/*.jsonl`) to find out what was decided, learned or done before. That is slow, costs far more tokens than the Brain, and is exactly what it replaces. Ask `brain_recall`. If the Brain doesn't know, read the code or ask the user, then **save the answer** with `brain_remember` so nobody has to dig again. Save as you go (when a decision is made, a problem is solved, a command is found), not only at the end: a session can stop at any time.
+
+If the user has set up the Brain's hooks, the index arrives by itself at the start of a session and clearly relevant memories are added to messages (as "Brain — remembered from earlier"). Use them, and still `brain_recall` for anything else.
+
+## Where we left off
+
+Each project has one **hand-off note**. The index shows it right under the header ("Where we left off"), so a new session knows what was in progress and what comes next without reading the last chat. Keep it current: before you stop, or when you reach a natural pause, call `brain_handoff` with a few lines (what's done, what's half-done, the next step, anything to watch out for). It replaces the previous note; don't append history to it.
 
 ## 1. Start: load the index once
 
-**Make `brain_context` your very first tool call, on its own.** Don't read files, grep or list directories in the same step. Look at the index first, then decide what (if anything) you still need to read; often the answer is already there.
+**Make `brain_context` your very first tool call, on its own** (unless the index is already in your context from a hook), and pass `task`, one sentence about what you're about to do, so the relevant memories come first. Don't read files, grep or list directories in the same step. Look at the index first, then decide what (if anything) you still need to read; often the answer is already there.
 
 If the Brain's tools aren't loaded yet (some clients defer MCP tools), load them before doing anything else. In Claude Code that's one tool search for `select:mcp__astralis-brain__brain_context,mcp__astralis-brain__brain_recall,mcp__astralis-brain__brain_map,mcp__astralis-brain__brain_remember,mcp__astralis-brain__brain_map_note`. Don't read files while you wait.
 
 `brain_context` returns one line per memory, grouped by type, with a `[handle]`. It also lists the user's preferences that apply everywhere ("Me") and says whether a code map exists.
 
+- Memories nobody has used for two months drop out of this list (they are still found by `brain_recall`).
 - Don't call it again in the same task. It doesn't change unless you save something.
 - Read it fully. It's short on purpose. Note any memory that bears on the task, and follow "Me" preferences, such as how the user likes explanations or which commands to avoid.
 
@@ -34,7 +45,14 @@ If the Brain doesn't know, fall back to files and search as usual. Then save wha
 
 Memories can be stale. Use them to go straight to the right place. Verify before anything destructive or irreversible: deleting, migrating, publishing.
 
+## Code: outline and find instead of reading whole files
+
+- `code_outline path` returns just the definitions in a file (functions, classes, headings…) with line numbers and signatures, a few hundred tokens instead of the whole file. Read the outline first, then read only the lines you need.
+- `code_find name` says where a function, type or class is defined, anywhere in the project. Use it before grepping.
+
 ## 3. Save what's worth knowing next time
+
+When you save, the Brain may answer that a **similar memory** already exists: if yours replaces or contradicts it, `brain_update` that memory (or `brain_forget` the wrong one) instead of leaving both. Details are capped at about 1,500 characters; one idea per memory, so split anything bigger.
 
 Use `brain_remember` when you learn something durable that would cost tokens or time to rediscover:
 
@@ -91,6 +109,16 @@ The same server reaches the user's notes app: `notes_search`, `notes_list`, `not
 - Keep the user's structure, wording and Markdown; change only what they asked for.
 - `notes_delete` archives the note; it can be restored. Delete it for good (`permanent: true`, on an archived note) only when the user clearly asked for that. Every edit keeps the previous version in the note's history.
 - `notes_move` files a note or a whole folder into another folder, out to the top level (`to_folder: "/"`), or into another vault. Deleting a folder keeps what's in it (it moves up a level).
+- If a tool says the user allows reading only, or no access, say so and suggest the change instead.
+
+## 8. The user's tasks and calendar
+
+Also **only when the user asks**: `plan_overview` (planners with progress, plus today's date and time; call it first), `planner_create` / `planner_update` / `planner_delete`, `tasks_list` / `tasks_add` / `tasks_edit` / `tasks_delete`, and `calendar_list` / `calendar_add` / `calendar_edit` / `calendar_delete`.
+
+- Planning a project (an app, a trip): break it into concrete, ordered tasks and make them in one `planner_create` call, with priorities and due dates the user gave. Don't invent deadlines.
+- Times are the user's local time: `YYYY-MM-DD` (all day) or `YYYY-MM-DD HH:MM`. Work out "tomorrow" or "next Tuesday" from the date `plan_overview` gives.
+- Appointments and work sessions go on the calendar (`calendar_add`; a start time alone makes it an hour, add `remind_minutes` for a reminder). Things to do go in tasks.
+- Look before you change: `tasks_list` / `calendar_list` give the `[handle]`s. Tick a task off with `tasks_edit` `status: "done"` (a repeating task moves to its next date) rather than deleting it.
 - If a tool says the user allows reading only, or no access, say so and suggest the change instead.
 
 ## Token discipline, in short

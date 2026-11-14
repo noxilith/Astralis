@@ -558,6 +558,13 @@ impl Store {
         Ok(format!("Moved the folder and everything in it to {}/{path}.", target.name))
     }
 
+    pub fn move_folder_to_vault(&self, folder: Uuid, from: Uuid, to: Uuid) -> Result<Uuid> {
+        if from == to {
+            return Ok(folder);
+        }
+        self.move_folder_tree(folder, from, to, None)
+    }
+
     fn move_folder_tree(&self, folder: Uuid, from: Uuid, to: Uuid, parent: Option<Uuid>) -> Result<Uuid> {
         let src = self.list_folders(Some(from))?.into_iter().find(|f| f.id == folder).ok_or(Error::NotFound("folder", folder))?;
         let existing = self.list_folders(Some(to))?.into_iter().find(|f| f.parent_id == parent && f.name.eq_ignore_ascii_case(&src.name));

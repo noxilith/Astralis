@@ -4,7 +4,7 @@ import { api, type Folder, type Id, type Note, type TagCount, type Template } fr
 import { useApp } from '../context'
 import { NoteRows, NoteTree, type NoteAction } from './NoteTree'
 import { SYNCED } from '../lib/collab'
-import { VaultSwitcher } from './VaultSwitcher'
+import { VaultSwitcher, vaultIcon } from './VaultSwitcher'
 import { Empty, Modal, useConfirm, usePrompt } from './ui'
 
 const expandedKey = (vault: Id) => `astralis.expanded.${vault}`
@@ -125,6 +125,26 @@ export function NotesNav() {
   /** Tell an open editor its note changed here (it reloads the title, pin, archive state). */
   const touched = (id: Id) => window.dispatchEvent(new CustomEvent(SYNCED, { detail: [id] }))
 
+  // Right-click, "Move to vault…": pick a vault (cloud vaults included) for a note or a folder.
+  const [moveTo, setMoveTo] = useState<{ note: Note } | { folder: Folder } | null>(null)
+  const moveToVault = (to: { id: Id; name: string }) => {
+    const target = moveTo
+    setMoveTo(null)
+    if (!target) return
+    folderAction(async () => {
+      if ('note' in target) {
+        await api.moveNoteToVault(target.note.id, to.id)
+        if (noteId === target.note.id) app.setNoteId(null)
+        app.toast(`Moved “${target.note.title || 'Untitled'}” to ${to.name}`)
+      } else {
+        await api.moveFolderToVault(target.folder.id, target.folder.vaultId, to.id)
+        if (activeFolderId === target.folder.id) setActiveFolderId(null)
+        app.toast(`Moved “${target.folder.name}” and everything in it to ${to.name}`)
+      }
+      app.refreshVaults()
+    })
+  }
+
   const noteAction = async (n: Note, action: NoteAction) => {
     const name = n.title || 'Untitled'
     switch (action) {
@@ -150,6 +170,8 @@ export function NotesNav() {
           })
           openNote(copy.id)
         })
+      case 'toVault':
+        return setMoveTo({ note: n })
       case 'toTop':
         return folderAction(() => api.moveNoteToFolder(n.id, null).then(app.publishNote))
       case 'archive':
@@ -278,6 +300,7 @@ export function NotesNav() {
             }}
             onPinNote={(id) => folderAction(() => api.setPinned(id, true).then(app.publishNote))}
             onNoteAction={noteAction}
+            onMoveFolderToVault={(f) => setMoveTo({ folder: f })}
             onDeleteFolder={async (f) => {
               const parent = f.parentId ? `“${folderPath(folders, f.parentId)}”` : 'the top level'
               if (await confirm.ask(`Delete folder “${f.name}”? Its notes and subfolders move to ${parent} — nothing is deleted.`, 'Delete folder')) {
@@ -311,6 +334,31 @@ export function NotesNav() {
         )}
       </div>
 
+      {moveTo && (
+        <Modal title={'note' in moveTo ? 'Move note to vault' : 'Move folder to vault'} onClose={() => setMoveTo(null)}>
+          <p className="muted small">
+            {'folder' in moveTo ? 'The folder, its subfolders and every note in them move together. ' : ''}
+            Moving into a cloud or shared vault syncs it to everyone there. Moving into an encrypted vault erases history, tags, links and the AI index, so no plaintext copy remains.
+          </p>
+          <div className="list">
+            {vaults
+              .filter((v) => v.id !== vaultId)
+              .map((v) => (
+                <div
+                  key={v.id}
+                  className="list-item"
+                  style={v.unlocked ? undefined : { opacity: 0.5, cursor: 'default' }}
+                  title={v.unlocked ? undefined : 'Unlock this vault first'}
+                  onClick={() => v.unlocked && moveToVault(v)}
+                >
+                  <div className="title">
+                    {vaultIcon(v, 13)} {v.name} {v.cloud && <span className="small faint">(cloud)</span>} {!v.unlocked && <span className="small faint">(locked)</span>}
+                  </div>
+                </div>
+              ))}
+          </div>
+        </Modal>
+      )}
       {templates && (
         <Modal title="New note from template" onClose={() => setTemplates(null)}>
           <div className="list">

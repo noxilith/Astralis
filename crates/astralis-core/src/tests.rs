@@ -1997,3 +1997,215 @@ fn images_in_a_shared_vault_reach_everyone_in_it() {
     sync_shared(&a, "A", &b, "B");
     assert_eq!(a.get_attachment(back.id).unwrap().1, jpg);
 }
+
+#[test]
+fn another_vault_can_become_the_brain_and_folders_move_between_vaults() {
+    let mut s = Store::open_in_memory().unwrap();
+    let first = s.brain_vault().unwrap();
+    let shared = s.create_vault("From my laptop", None).unwrap();
+    s.set_brain_vault(shared.id).unwrap();
+    assert_eq!(s.brain_vault().unwrap(), shared.id);
+    assert_ne!(first, shared.id);
+
+    let f = s.create_folder(Some(first), None, "Ideas").unwrap();
+    let n = s.create_note(NewNote { title: "One".into(), vault_id: Some(first), folder_id: Some(f.id), ..Default::default() }).unwrap();
+    s.move_folder_to_vault(f.id, first, shared.id).unwrap();
+    let moved = s.get_note(n.id).unwrap();
+    assert_eq!(moved.vault_id, shared.id);
+    assert!(moved.folder_id.is_some());
+    assert!(s.list_folders(Some(first)).unwrap().is_empty());
+}
+
+#[test]
+fn brain_hook_recalls_only_what_clearly_matches_and_costs_nothing_otherwise() {
+    use crate::memory::MemoryKind;
+    let mut s = store();
+    let p = s.brain_project("git@github.com:me/app.git", "app").unwrap();
+    s.remember(p, MemoryKind::Gotcha, "Python is broken on this machine", "Use node for scripted edits instead of python.", "claude-code").unwrap();
+    s.remember(p, MemoryKind::Decision, "Sync is per vault", "Only shared vaults sync between peers.\nOwners alone can delete a shared vault.", "claude-code").unwrap();
+
+    // A message about something remembered brings it up, unasked.
+    let text = s.brain_hook_prompt(p, "can you write a python script to edit these files?").unwrap().expect("should recall");
+    assert!(text.contains("Python is broken") && text.contains("brain_read"), "{text}");
+    // Unrelated or empty messages add nothing.
+    assert!(s.brain_hook_prompt(p, "ok thanks").unwrap().is_none());
+    assert!(s.brain_hook_prompt(p, "what's the weather in Lisbon tomorrow?").unwrap().is_none());
+    // Unasked recalls don't count as misses (only searches the agent made do).
+    let before = s.brain_stats().unwrap();
+    assert_eq!(before.misses, 0);
+    s.brain_recall(p, "kubernetes ingress annotations", 3).unwrap();
+    let after = s.brain_stats().unwrap();
+    assert_eq!((after.hits, after.misses), (before.hits, 1));
+    s.brain_recall(p, "python edits", 3).unwrap();
+    assert_eq!(s.brain_stats().unwrap().hits, before.hits + 1);
+}
+
+#[test]
+fn the_index_puts_what_the_task_needs_first_and_drops_old_unused_memories() {
+    use crate::memory::MemoryKind;
+    let mut s = store();
+    let p = s.brain_project("git@github.com:me/app.git", "app").unwrap();
+    // Distinct made-up words, so none of these look like duplicates of each other and merge.
+    let word = |i: usize, k: usize| format!("{}{}{}ium", (b'a' + ((i * 7 + k * 3) % 26) as u8) as char, (b'a' + (i % 26) as u8) as char, (b'a' + (i / 26 + k * 5) as u8) as char);
+    for i in 0..60 {
+        s.remember(p, MemoryKind::Fact, &format!("{} {} {} widgets", word(i, 0), word(i, 1), word(i, 2)), &format!("{} {} details.", word(i, 0), word(i, 3)), "claude-code").unwrap();
+    }
+    s.remember(p, MemoryKind::Gotcha, "The release build needs the glslc wrapper on PATH", "Set up through run.sh.", "claude-code").unwrap();
+    // Without a task the useful-looking one may not make the short list; with one it leads.
+    let ctx = s.brain_context_for(p, None, Some("fix the release build, glslc fails")).unwrap();
+    assert!(ctx.contains("glslc wrapper"), "{ctx}");
+    assert!(ctx.contains("+") && ctx.contains("more"), "the rest is counted: {ctx}");
+    assert!(ctx.contains("not old chats"), "carries the standing rule");
+    let lines = ctx.lines().filter(|l| l.starts_with("- [")).count();
+    assert!(lines <= 40, "{lines} lines");
+
+    // A memory that's old and never recalled leaves the index but is still found by searching.
+    let target = format!("{} {} {} widgets", word(7, 0), word(7, 1), word(7, 2));
+    let old = s.brain_memories(Some(p)).unwrap().into_iter().find(|m| m.hook == target).unwrap();
+    s.conn.execute("UPDATE notes SET updated_at = ?1 WHERE id = ?2", rusqlite::params![0i64, old.id.as_bytes()]).unwrap();
+    let ctx = s.brain_context_for(p, None, None).unwrap();
+    assert!(!ctx.contains(&target), "stale memory stays out of the index");
+    let (_, found) = s.brain_recall(p, &target, 3).unwrap();
+    assert!(found.iter().any(|m| m.id == old.id), "but search still finds it");
+}
+
+#[test]
+fn the_handoff_note_is_one_note_that_leads_the_index() {
+    use crate::memory::HANDOFF_HOOK;
+    let mut s = store();
+    let p = s.brain_project("git@github.com:me/app.git", "app").unwrap();
+    assert!(s.brain_context(p, None).unwrap().contains("No hand-off note yet"));
+    s.brain_handoff_save(p, "Halfway through moving sync to per-vault scope.\nNext: add the SyncScope test.", "claude-code").unwrap();
+    let again = s.brain_handoff_save(p, "Sync done. Next: release notes.", "codex").unwrap();
+    assert_eq!(s.brain_memories(Some(p)).unwrap().iter().filter(|m| m.hook == HANDOFF_HOOK).count(), 1, "replaced, not added");
+    assert!(again.content.contains("release notes") && !again.content.contains("SyncScope"));
+    let ctx = s.brain_context(p, None).unwrap();
+    let at = ctx.find("Where we left off").expect("shown");
+    assert!(ctx.contains("Sync done. Next: release notes.") && at < ctx.find("Code map").unwrap_or(usize::MAX));
+    assert!(ctx.contains("0 memories"), "the note isn't counted as a memory: {ctx}");
+    // It isn't something recall hands back, and it can't be empty or huge.
+    let (_, found) = s.brain_recall(p, "release notes sync", 5).unwrap();
+    assert!(found.is_empty());
+    assert!(s.brain_handoff_save(p, "  ", "x").is_err());
+    assert!(s.brain_handoff_save(p, &"x".repeat(1500), "x").is_err());
+}
+
+#[test]
+fn recall_understands_everyday_synonyms() {
+    use crate::memory::MemoryKind;
+    let mut s = store();
+    let p = s.brain_project("git@github.com:me/app.git", "app").unwrap();
+    s.remember(p, MemoryKind::Howto, "Compile the release with run.sh and the glslc wrapper", "Set CARGO_BUILD_JOBS=4 so it fits in memory.", "claude-code").unwrap();
+    s.remember(p, MemoryKind::Fact, "The logo is an SVG in docs/images", "Used by the README.", "claude-code").unwrap();
+    let (text, found) = s.brain_recall(p, "how do I build the release?", 3).unwrap();
+    assert!(found.first().is_some_and(|m| m.hook.starts_with("Compile the release")), "{text}");
+    let (_, found) = s.brain_recall(p, "the app crashes on start", 3).unwrap();
+    assert!(found.is_empty(), "unrelated stays unrelated");
+}
+
+#[test]
+fn saving_checks_size_and_points_out_overlaps_and_busy_projects_merge_duplicates() {
+    use crate::memory::MemoryKind;
+    let mut s = store();
+    let p = s.brain_project("git@github.com:me/app.git", "app").unwrap();
+    // Too long: one idea per memory.
+    let err = s.remember(p, MemoryKind::Fact, "A long essay", &"word ".repeat(400), "claude-code").unwrap_err().to_string();
+    assert!(err.contains("one idea per memory"), "{err}");
+
+    // Overlap without being the same: reported, not merged.
+    s.remember(p, MemoryKind::Decision, "Sync is per vault and only owners may delete a shared vault", "Peers can't write outside shared vaults.\nOwners alone can delete a shared vault.", "claude-code").unwrap();
+    let (new, merged) = s
+        .remember(p, MemoryKind::Decision, "Members may leave a shared vault but never delete it", "Deleting a shared vault is for owners only.\nMembers just leave.", "claude-code")
+        .unwrap();
+    assert!(!merged);
+    let similar = s.brain_similar(p, &new.hook, &new.content, Some(new.id)).unwrap();
+    assert!(similar.iter().any(|m| m.hook.starts_with("Sync is per vault")), "{similar:?}");
+
+    // Busy project: copies that crept in are merged (keeping the newer), at most once a day.
+    let word = |i: usize, k: usize| format!("{}{}{}ium", (b'a' + ((i * 7 + k * 3) % 26) as u8) as char, (b'a' + (i % 26) as u8) as char, (b'a' + (i / 26 + k * 5) as u8) as char);
+    for i in 0..26 {
+        s.remember(p, MemoryKind::Fact, &format!("{} {} {} widgets", word(i, 0), word(i, 1), word(i, 2)), &format!("{} {} details.", word(i, 0), word(i, 3)), "claude-code").unwrap();
+    }
+    let a = s.brain_memories(Some(p)).unwrap().into_iter().find(|m| m.hook.starts_with(&word(3, 0))).unwrap();
+    let b = s.brain_memories(Some(p)).unwrap().into_iter().find(|m| m.hook.starts_with(&word(4, 0))).unwrap();
+    s.update_memory(&b.short, Some(&a.hook), Some(&a.content), None, "claude-code").unwrap();
+    // (Saving in a busy project already ran it today while the project filled up; allow another run.)
+    s.set_setting(&format!("brain.housekeeping.{p}"), "0").unwrap();
+    let before = s.brain_memories(Some(p)).unwrap().len();
+    assert_eq!(s.brain_housekeeping(p).unwrap(), 1);
+    assert_eq!(s.brain_memories(Some(p)).unwrap().len(), before - 1);
+    assert_eq!(s.brain_housekeeping(p).unwrap(), 0, "once a day");
+
+    // The app's numbers: how many memories there are and how many have ever helped.
+    s.brain_recall(p, "owners delete shared vault", 3).unwrap();
+    let st = s.brain_stats_report().unwrap();
+    assert!(st.memories >= 20 && st.used >= 1 && st.used < st.memories);
+}
+
+#[test]
+fn the_brain_refuses_secrets_but_not_ordinary_text() {
+    use crate::memory::{MemoryKind, looks_like_secret};
+    for bad in [
+        &format!("the key is {}{}", "sk-", "abcdefghijklmnopqrstuvwxyz123456"),
+        &format!("token {}{}", "ghp_", "abcdefghijklmnopqrstuvwxyz0123456789"),
+        &format!("AWS id {}{}", "AKIA", "IOSFODNN7EXAMPLE1"),
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIE",
+        "password = hunter2hunter2",
+        "api_key: \"a8f3b2c9d0e1\"",
+        "Authorization: Bearer abcdef0123456789",
+        &format!("jwt {}{}", "eyJhbGciOiJIUzI1NiJ9.", "eyJzdWIiOiIxMjM0NTY3ODkw.dBjftJeZ4CVPmB92K27uhbUJU1p1r"),
+    ] {
+        assert!(looks_like_secret(bad).is_some(), "should refuse: {bad}");
+    }
+    for fine in [
+        "Run the app with ./run.sh app",
+        "The password field is hashed with argon2 before storing",
+        "Set password = <your password> in the config",
+        "commit 3f786850e387550fdab836ed7e6dc881de23001b fixed it",
+        "The API key lives in ~/.config/app/credentials",
+        "token = $TOKEN",
+        "Use the sk- prefix for keys",
+    ] {
+        assert!(looks_like_secret(fine).is_none(), "should allow: {fine}");
+    }
+    let mut s = store();
+    let p = s.brain_project("git@github.com:me/app.git", "app").unwrap();
+    let err = s.remember(p, MemoryKind::Fact, "Deploy key", &format!("use {}{} to deploy", "sk-", "abcdefghijklmnopqrstuvwxyz123456"), "claude-code").unwrap_err().to_string();
+    assert!(err.contains("won't save secrets"), "{err}");
+    let (m, _) = s.remember(p, MemoryKind::Fact, "Deploy key location", "The key is in ~/.config/deploy/key", "claude-code").unwrap();
+    assert!(s.update_memory(&m.short, None, Some("now password=correcthorse99"), None, "claude-code").is_err());
+    assert!(s.brain_handoff_save(p, "token=abcdef0123456789abcdef", "claude-code").is_err());
+}
+
+#[test]
+fn the_index_flags_memories_that_mention_files_that_are_gone() {
+    use crate::memory::MemoryKind;
+    let root = std::env::temp_dir().join(format!("astralis-stale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("crates/core/src")).unwrap();
+    std::fs::write(root.join("crates/core/src/live.rs"), "fn x() {}").unwrap();
+    let mut s = store();
+    let p = s.brain_project("git@github.com:me/app.git", "app").unwrap();
+    s.remember(p, MemoryKind::Fact, "Sync lives in crates/core/src/live.rs", "Still here.", "claude-code").unwrap();
+    s.remember(p, MemoryKind::Fact, "Old merge code is in crates/core/src/old_merge.rs", "Removed in a refactor.", "claude-code").unwrap();
+    s.remember(p, MemoryKind::Fact, "The website sources are in site/pages/index.html", "A folder this checkout doesn't have.", "claude-code").unwrap();
+    let ctx = s.brain_context(p, Some(&root)).unwrap();
+    assert!(ctx.contains("old_merge.rs is gone") || ctx.contains("crates/core/src/old_merge.rs is gone"), "{ctx}");
+    assert!(!ctx.contains("live.rs is gone"), "existing paths aren't flagged: {ctx}");
+    assert!(!ctx.contains("index.html is gone"), "paths in folders the project doesn't have aren't flagged: {ctx}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_hook_doesnt_repeat_memories_it_already_gave_this_session() {
+    use crate::memory::MemoryKind;
+    use std::collections::HashSet;
+    let mut s = store();
+    let p = s.brain_project("git@github.com:me/app.git", "app").unwrap();
+    s.remember(p, MemoryKind::Gotcha, "Python is broken on this machine", "Use node for scripted edits instead of python.", "claude-code").unwrap();
+    let mut shown = HashSet::new();
+    let (text, handles) = s.brain_hook_prompt_new(p, "write a python script to edit these files", &shown).unwrap().expect("first time");
+    assert!(text.contains("Python is broken"));
+    shown.extend(handles);
+    assert!(s.brain_hook_prompt_new(p, "another python script for editing files please", &shown).unwrap().is_none(), "already given");
+}

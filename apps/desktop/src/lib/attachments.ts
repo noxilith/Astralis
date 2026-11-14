@@ -77,3 +77,26 @@ export async function insertImages(
   view.dispatch({ changes: { from: pos, insert }, selection: { anchor: pos + insert.length }, scrollIntoView: true })
   view.focus()
 }
+
+/** Ticks or unticks the `index`-th task item (`- [ ]`) in a note's text, skipping code blocks. */
+export function toggleTask(body: string, index: number, checked: boolean): string {
+  const lines = body.split('\n')
+  let fence: string | null = null
+  let n = 0
+  for (let i = 0; i < lines.length; i++) {
+    const f = /^\s*(`{3,}|~{3,})/.exec(lines[i])
+    if (f) {
+      if (!fence) fence = f[1][0]
+      else if (f[1][0] === fence) fence = null
+      continue
+    }
+    if (fence) continue
+    const m = /^((?:\s*>)*\s*(?:[-*+]|\d+[.)])\s+\[)([ xX])(\])/.exec(lines[i])
+    if (!m) continue
+    if (n++ === index) {
+      lines[i] = m[1] + (checked ? 'x' : ' ') + m[3] + lines[i].slice(m[0].length)
+      break
+    }
+  }
+  return lines.join('\n')
+}

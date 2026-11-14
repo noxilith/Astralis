@@ -59,37 +59,48 @@ pub async fn create_cloud_vault(
         bail!("give the vault a name");
     }
     let vault = store.lock().unwrap().create_vault(name, None).map_err(|e| anyhow!("{e}"))?;
-    let made = async {
-        let root = drive.root_folder().await?;
-        let props = BTreeMap::from([
-            (PROP_KIND.to_string(), "vault".to_string()),
-            (PROP_VAULT.to_string(), vault.id.to_string()),
-            (PROP_OWNER.to_string(), device.to_string()),
-            (PROP_OWNER_NAME.to_string(), device_name.chars().take(60).collect()),
-        ]);
-        drive.create_folder(name, &root, &props).await
+    if let Err(e) = make_cloud(drive, store, vault.id, name, device, device_name).await {
+        // Don't leave a half-made vault behind.
+        let _ = store.lock().unwrap().delete_vault(vault.id, None);
+        return Err(e);
     }
-    .await;
-    let folder = match made {
-        Ok(f) => f,
-        Err(e) => {
-            // Don't leave a half-made vault behind.
-            let _ = store.lock().unwrap().delete_vault(vault.id, None);
-            return Err(e);
+    store.lock().unwrap().get_vault(vault.id).map_err(|e| anyhow!("{e}"))
+}
+
+/// Puts an existing (plain) vault on the Drive: makes its `Astralis/<name>/` folder and a fresh
+/// sync key. Used for new cloud vaults and for turning the Brain into a cloud vault.
+pub async fn make_cloud(drive: &GoogleDrive, store: &StoreHandle, vault: Uuid, name: &str, device: &str, device_name: &str) -> Result<()> {
+    {
+        let s = store.lock().unwrap();
+        if s.cloud_vault(vault).map_err(|e| anyhow!("{e}"))?.is_some() {
+            bail!("this vault is already in the cloud");
         }
-    };
+        let v = s.get_vault(vault).map_err(|e| anyhow!("{e}"))?;
+        if v.encrypted || v.owner.is_some() {
+            bail!("only your own, unencrypted vaults can go to the cloud");
+        }
+    }
+    let root = drive.root_folder().await?;
+    let props = BTreeMap::from([
+        (PROP_KIND.to_string(), "vault".to_string()),
+        (PROP_VAULT.to_string(), vault.to_string()),
+        (PROP_OWNER.to_string(), device.to_string()),
+        (PROP_OWNER_NAME.to_string(), device_name.chars().take(60).collect()),
+    ]);
+    let folder = drive.create_folder(name, &root, &props).await?;
     let key = astralis_core::vault::random::<32>().map_err(|e| anyhow!("{e}"))?;
-    let s = store.lock().unwrap();
-    s.set_cloud_vault(&CloudVault {
-        vault_id: vault.id,
-        provider: GOOGLE_DRIVE.into(),
-        folder_id: folder,
-        sync_key: key.to_vec(),
-        owned: true,
-        uploaded_vv: Default::default(),
-    })
-    .map_err(|e| anyhow!("{e}"))?;
-    s.get_vault(vault.id).map_err(|e| anyhow!("{e}"))
+    store
+        .lock()
+        .unwrap()
+        .set_cloud_vault(&CloudVault {
+            vault_id: vault,
+            provider: GOOGLE_DRIVE.into(),
+            folder_id: folder,
+            sync_key: key.to_vec(),
+            owned: true,
+            uploaded_vv: Default::default(),
+        })
+        .map_err(|e| anyhow!("{e}"))
 }
 
 /// Invites someone by email: shares the folder with them (Google emails them) and leaves a

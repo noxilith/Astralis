@@ -11,6 +11,10 @@ export interface NeuralHandle {
   setQuery(q: string): void
   setSurface(on: boolean): void
   fit(): void
+  /** Light up these memories (an agent just used them) and send signals down their wires. */
+  pulse(ids: string[]): void
+  /** Average milliseconds to draw one frame (for checking performance). */
+  benchmark(frames?: number): number
 }
 
 const TAU = Math.PI * 2
@@ -119,6 +123,9 @@ function normalAt(p: V3): V3 {
 }
 
 /** Points on the brain's surface (with their normals), brighter along the folds. */
+/** The brain's surface never changes, so it's made once (it's slow to make). */
+let surfaceCache: { p: V3; n: V3; a: number }[] | null = null
+
 function surfacePoints(count: number): { p: V3; n: V3; a: number }[] {
   const r = rng('astralis-brain-surface')
   const out: { p: V3; n: V3; a: number }[] = []
@@ -161,6 +168,8 @@ interface Neuron extends Memory {
   depth: number
   scale: number
   weight: number
+  /** Its glow picture (made once, not every frame). */
+  spr: HTMLCanvasElement | null
 }
 
 interface Region {
@@ -171,6 +180,7 @@ interface Region {
 }
 
 export function createNeural(el: HTMLCanvasElement, graph: BrainGraph, onOpen: (id: string) => void): NeuralHandle {
+  const built = performance.now()
   const ctx = el.getContext('2d')!
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
@@ -199,6 +209,20 @@ export function createNeural(el: HTMLCanvasElement, graph: BrainGraph, onOpen: (
   // ---- neurons: spread through their lobe, in both hemispheres ----
   const neurons: Neuron[] = []
   const byId = new Map<string, Neuron>()
+  // A grid of where neurons are, so "how close is the nearest one" looks only at the cells around a
+  // point instead of at every neuron (that was slow with hundreds of memories).
+  const CELL = 0.14
+  const grid = new Map<string, Neuron[]>()
+  const cellKey = (x: number, y: number, z: number) => `${Math.floor(x / CELL)},${Math.floor(y / CELL)},${Math.floor(z / CELL)}`
+  const nearestTo = (p: V3) => {
+    let best = CELL
+    const cx = Math.floor(p[0] / CELL), cy_ = Math.floor(p[1] / CELL), cz = Math.floor(p[2] / CELL)
+    for (let dx = -1; dx <= 1; dx++)
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dz = -1; dz <= 1; dz++)
+          for (const o of grid.get(`${cx + dx},${cy_ + dy},${cz + dz}`) ?? []) best = Math.min(best, Math.hypot(o.p[0] - p[0], o.p[1] - p[1], o.p[2] - p[2]))
+    return best
+  }
   const ordered = [...graph.nodes].sort((a, b) => b.recallCount - a.recallCount || Number(b.pinned) - Number(a.pinned))
   for (const m of ordered) {
     const r = rng(m.id)
@@ -211,8 +235,7 @@ export function createNeural(el: HTMLCanvasElement, graph: BrainGraph, onOpen: (
       const c = region?.c ?? [0, 0, 0]
       const p: V3 = [c[0] + (r() - 0.5) * 2 * spread, c[1] + (r() - 0.5) * 2 * spread, side * c[2] + (r() - 0.5) * 2 * spread * 0.8]
       if (!inBrain(p, 0.9) || (region && regionOf(p) !== region)) continue
-      const nearest = neurons.reduce((d, o) => Math.min(d, Math.hypot(o.p[0] - p[0], o.p[1] - p[1], o.p[2] - p[2])), 9)
-      const score = Math.min(nearest, 0.14) - spread * 0.05
+      const score = nearestTo(p) - spread * 0.05
       if (score > bestScore) {
         bestScore = score
         best = p
@@ -228,22 +251,49 @@ export function createNeural(el: HTMLCanvasElement, graph: BrainGraph, onOpen: (
       depth: 0,
       scale: 1,
       weight: 1 + m.recallCount + (m.recalledAt && Date.now() - m.recalledAt < 3 * 86400000 ? 6 : 0),
+      spr: null,
     }
     neurons.push(n)
     byId.set(n.id, n)
+    const key = cellKey(best[0], best[1], best[2])
+    grid.set(key, [...(grid.get(key) ?? []), n])
   }
 
   // ---- wiring ----
   const synapses = graph.links.map((l) => ({ a: byId.get(l.a)!, b: byId.get(l.b)!, s: l.strength })).filter((l) => l.a && l.b)
   const dist3 = (a: V3, b: V3) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2])
   const dendrites: [Neuron, Neuron][] = []
-  for (const n of neurons) {
-    const near = neurons
-      .filter((o) => o !== n)
-      .map((o) => [o, dist3(o.p, n.p)] as const)
-      .sort((a, b) => a[1] - b[1])
-      .slice(0, 2)
-    for (const [o] of near) if (!dendrites.some(([p, q]) => (p === o && q === n) || (p === n && q === o))) dendrites.push([n, o])
+  {
+    // Each neuron reaches its two nearest neighbours (looked up through a grid of coarse cells).
+    const C = 0.22
+    const cells = new Map<string, Neuron[]>()
+    const key = (x: number, y: number, z: number) => `${Math.floor(x / C)},${Math.floor(y / C)},${Math.floor(z / C)}`
+    for (const n of neurons) {
+      const k = key(n.p[0], n.p[1], n.p[2])
+      cells.set(k, [...(cells.get(k) ?? []), n])
+    }
+    const done = new Set<string>()
+    for (const n of neurons) {
+      const cx = Math.floor(n.p[0] / C), cy_ = Math.floor(n.p[1] / C), cz = Math.floor(n.p[2] / C)
+      let near: Neuron[] = []
+      for (let reach = 1; reach <= 3 && near.length < 3; reach++) {
+        near = []
+        for (let dx = -reach; dx <= reach; dx++)
+          for (let dy = -reach; dy <= reach; dy++)
+            for (let dz = -reach; dz <= reach; dz++) for (const o of cells.get(`${cx + dx},${cy_ + dy},${cz + dz}`) ?? []) if (o !== n) near.push(o)
+      }
+      if (near.length < 2) near = neurons.filter((o) => o !== n)
+      const two = near
+        .map((o) => [o, dist3(o.p, n.p)] as const)
+        .sort((x, y) => x[1] - y[1])
+        .slice(0, 2)
+      for (const [o] of two) {
+        const pair = n.id < o.id ? n.id + '|' + o.id : o.id + '|' + n.id
+        if (done.has(pair)) continue
+        done.add(pair)
+        dendrites.push([n, o])
+      }
+    }
   }
   const wiresOf = new Map<Neuron, { to: Neuron; synapse: boolean }[]>()
   const addWire = (a: Neuron, b: Neuron, synapse: boolean) => wiresOf.set(a, [...(wiresOf.get(a) ?? []), { to: b, synapse }])
@@ -257,7 +307,7 @@ export function createNeural(el: HTMLCanvasElement, graph: BrainGraph, onOpen: (
   }
 
   // ---- the surface: tiny 3D points ----
-  const surface = surfacePoints(9000)
+  const surface = (surfaceCache ??= surfacePoints(9000))
   let showSurface = true
 
   const sprites = new Map<string, HTMLCanvasElement>()
@@ -277,6 +327,8 @@ export function createNeural(el: HTMLCanvasElement, graph: BrainGraph, onOpen: (
     sprites.set(color, s)
     return s
   }
+
+  for (const n of neurons) n.spr = sprite(kindColor(n.kind, 0.95))
 
   // ---- camera: orbit around the brain ----
   let w = 0
@@ -308,28 +360,21 @@ export function createNeural(el: HTMLCanvasElement, graph: BrainGraph, onOpen: (
     return { x: w / 2 + x1 * f, y: h / 2 + 22 - y2 * f, depth: z2, scale: f / (focal / DIST) }
   }
 
+  let sortedNeurons: Neuron[] | null = null
+  let frameNo = 0
   let query = ''
   let hover: Neuron | null = null
   let raf = 0
   let last = performance.now()
-  let nextFire = 0
   const pulses: { from: Neuron; to: Neuron; t: number; speed: number; depth: number; synapse: boolean }[] = []
-  const fire = (n: Neuron, depth: number) => {
+  // Signals only travel when an agent calls a tool on a memory (`pulse`); `all` sends one down every wire.
+  const fire = (n: Neuron, depth: number, all = false) => {
     n.flash = 1
-    if (pulses.length > 140) return
+    if (pulses.length > 140 || reduced) return
     for (const wire of wiresOf.get(n) ?? []) {
-      if (!wire.synapse && Math.random() > 0.35) continue
+      if (!all && !wire.synapse && Math.random() > 0.35) continue
       pulses.push({ from: n, to: wire.to, t: 0, speed: 0.7 + Math.random() * 0.6, depth, synapse: wire.synapse })
     }
-  }
-  const totalWeight = neurons.reduce((s, n) => s + n.weight, 0)
-  const pick = () => {
-    let r = Math.random() * totalWeight
-    for (const n of neurons) {
-      r -= n.weight
-      if (r <= 0) return n
-    }
-    return neurons[0]
   }
 
   function frame(now: number) {
@@ -344,17 +389,13 @@ export function createNeural(el: HTMLCanvasElement, graph: BrainGraph, onOpen: (
     view.pitch += (goal.pitch - view.pitch) * f
     view.zoom = Math.exp(Math.log(view.zoom) + (Math.log(goal.zoom) - Math.log(view.zoom)) * f)
 
-    if (!reduced && neurons.length && now > nextFire) {
-      fire(pick(), 0)
-      nextFire = now + 380 + Math.random() * 520
-    }
     for (let i = pulses.length - 1; i >= 0; i--) {
       const p = pulses[i]
       p.t += dt * p.speed
       if (p.t >= 1) {
         pulses.splice(i, 1)
         p.to.flash = Math.max(p.to.flash, p.synapse ? 0.9 : 0.5)
-        if (p.depth < 3 && Math.random() < (p.synapse ? 0.5 : 0.25)) fire(p.to, p.depth + 1)
+        if (p.depth < 2 && Math.random() < (p.synapse ? 0.5 : 0.25)) fire(p.to, p.depth + 1)
       }
     }
     for (const n of neurons) n.flash = Math.max(0, n.flash - dt * 1.6)
@@ -389,6 +430,8 @@ export function createNeural(el: HTMLCanvasElement, graph: BrainGraph, onOpen: (
         const rim = 1 - Math.abs(nz2)
         const facing = nz2 > 0 ? 0.45 : 1 // away from you
         const b = (0.3 + 1.6 * rim * rim) * facing * (0.45 + s.a * 0.75) * fade(q.depth * 0.5)
+        // The faintest points (mostly the far side) can't be seen; drawing them is wasted work.
+        if (b < 0.14) continue
         const i = b > 0.7 ? 3 : b > 0.45 ? 2 : b > 0.25 ? 1 : 0
         const size = 1.6 * q.scale * Math.sqrt(view.zoom)
         buckets[i].rect(q.x, q.y, size, size)
@@ -425,16 +468,36 @@ export function createNeural(el: HTMLCanvasElement, graph: BrainGraph, onOpen: (
     ctx.strokeStyle = `rgba(150, 140, 255, ${dimAll ? 0.03 : 0.07})`
     ctx.lineWidth = 1
     ctx.stroke(dpath)
+    // Synapses: the ordinary ones are drawn in a few batches by brightness (thousands of separate
+    // strokes are slow); the ones on the hovered neuron are drawn bright on top.
+    const LEVELS = 6
+    const batches: Path2D[] = Array.from({ length: LEVELS }, () => new Path2D())
+    const used = new Array<boolean>(LEVELS).fill(false)
+    const top = dimAll ? 0.04 : 0.32
     for (const s of synapses) {
-      const on = hover && (s.a === hover || s.b === hover)
-      const depthA = fade((s.a.depth + s.b.depth) / 2)
-      const a = (on ? 0.8 : dimAll ? 0.04 : 0.1 + s.s * 0.22) * (on ? 1 : depthA)
-      ctx.strokeStyle = on ? kindColor(hover!.kind, a) : `rgba(175, 165, 255, ${a})`
-      ctx.lineWidth = on ? 1.6 : 1
-      ctx.beginPath()
-      ctx.moveTo(s.a.sx, s.a.sy)
-      ctx.lineTo(s.b.sx, s.b.sy)
-      ctx.stroke()
+      if (hover && (s.a === hover || s.b === hover)) continue
+      const a = (dimAll ? 0.04 : 0.1 + s.s * 0.22) * fade((s.a.depth + s.b.depth) / 2)
+      const level = clamp(Math.round((a / top) * (LEVELS - 1)), 0, LEVELS - 1)
+      used[level] = true
+      batches[level].moveTo(s.a.sx, s.a.sy)
+      batches[level].lineTo(s.b.sx, s.b.sy)
+    }
+    ctx.lineWidth = 1
+    batches.forEach((p, i) => {
+      if (!used[i]) return
+      ctx.strokeStyle = `rgba(175, 165, 255, ${Math.max(0.02, (top * i) / (LEVELS - 1))})`
+      ctx.stroke(p)
+    })
+    if (hover) {
+      ctx.lineWidth = 1.6
+      for (const s of synapses) {
+        if (s.a !== hover && s.b !== hover) continue
+        ctx.strokeStyle = kindColor(hover.kind, 0.8)
+        ctx.beginPath()
+        ctx.moveTo(s.a.sx, s.a.sy)
+        ctx.lineTo(s.b.sx, s.b.sy)
+        ctx.stroke()
+      }
     }
     // Signals.
     for (const p of pulses) {
@@ -459,13 +522,18 @@ export function createNeural(el: HTMLCanvasElement, graph: BrainGraph, onOpen: (
       ctx.globalAlpha = 1
     }
     // Neurons, far ones first.
-    const sorted = [...neurons].sort((a, b) => b.depth - a.depth)
+    // Far ones first. (The order only changes as the brain turns, so it's re-sorted every few frames.)
+    if (!sortedNeurons || frameNo++ % 4 === 0) sortedNeurons = [...neurons].sort((a, b) => b.depth - a.depth)
+    const sorted = sortedNeurons
     for (const n of sorted) {
       const on = lit.has(n) || (query_ && match(n))
       const dim = dimAll && !on
       const rad = (n.r * 3.3 + n.flash * 6) * n.scale * clamp(view.zoom, 0.7, 1.8) * (n === hover ? 1.5 : 1)
-      ctx.globalAlpha = (dim ? 0.18 : 0.6 + n.flash * 0.4) * (on ? 1 : fade(n.depth))
-      ctx.drawImage(sprite(kindColor(n.kind, 0.95)), n.sx - rad, n.sy - rad, rad * 2, rad * 2)
+      const alpha = (dim ? 0.18 : 0.6 + n.flash * 0.4) * (on ? 1 : fade(n.depth))
+      // Neurons on the far side are nearly invisible; skipping them saves a lot of drawing.
+      if (alpha < 0.09 && !n.new) continue
+      ctx.globalAlpha = alpha
+      ctx.drawImage(n.spr!, n.sx - rad, n.sy - rad, rad * 2, rad * 2)
       if (n.new && !dim) {
         ctx.globalAlpha = 0.6 * fade(n.depth)
         ctx.strokeStyle = kindColor(n.kind, 0.8)
@@ -614,6 +682,7 @@ export function createNeural(el: HTMLCanvasElement, graph: BrainGraph, onOpen: (
   el.addEventListener('gesturestart', onGestureStart)
   el.addEventListener('gesturechange', onGestureChange)
   raf = requestAnimationFrame(frame)
+  if (import.meta.env.DEV) console.info(`[neural] ${neurons.length} neurons built in ${Math.round(performance.now() - built)} ms`)
 
   return {
     destroy() {
@@ -631,6 +700,18 @@ export function createNeural(el: HTMLCanvasElement, graph: BrainGraph, onOpen: (
     },
     setSurface(on) {
       showSurface = on
+    },
+    pulse(ids) {
+      const want = new Set(ids)
+      for (const n of neurons) if (want.has(n.id)) fire(n, 0, true)
+    },
+    benchmark(frames = 60) {
+      const start = performance.now()
+      for (let i = 0; i < frames; i++) {
+        view.yaw += 0.01
+        paint()
+      }
+      return (performance.now() - start) / frames
     },
     fit() {
       Object.assign(goal, { yaw: -0.65, pitch: 0.28, zoom: 1 })

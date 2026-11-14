@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from 'react'
-import { Archive, ChevronDown, ChevronRight, Copy, CornerLeftUp, ExternalLink, Folder as FolderIcon, FolderOpen, FolderPlus, MoreHorizontal, Pencil, PenTool, Pin, PinOff, StickyNote, Trash2 } from 'lucide-react'
+import { Archive, ChevronDown, ChevronRight, Copy, CornerLeftUp, ExternalLink, Folder as FolderIcon, FolderOpen, FolderPlus, MoreHorizontal, Pencil, PenTool, Pin, PinOff, StickyNote, Trash2, Vault } from 'lucide-react'
 import type { Folder, Id, Note } from '../api'
 import { useCollab, type Presence } from '../lib/collab'
 
@@ -13,7 +13,7 @@ type Target = Id | 'root' | 'pinned'
 const DRAG_START = 5
 
 /** What the right-click menu on a note can do. */
-export type NoteAction = 'open' | 'rename' | 'pin' | 'duplicate' | 'toTop' | 'archive' | 'delete'
+export type NoteAction = 'open' | 'rename' | 'pin' | 'duplicate' | 'toTop' | 'toVault' | 'archive' | 'delete'
 
 /** Keeps a context menu on screen near the bottom/right edges. */
 const menuPos = (x: number, y: number, height: number) => ({
@@ -39,6 +39,8 @@ export interface NoteTreeProps {
   onNewFolder: (parentId: Id | null) => void
   onRenameFolder: (f: Folder) => void
   onDeleteFolder: (f: Folder) => void
+  /** Right-click, "Move to vault…" on a folder. */
+  onMoveFolderToVault?: (f: Folder) => void
   /** Dropping a note on the Pinned section pins it. */
   onPinNote?: (noteId: Id) => void
   /** Right-click menu on a note. */
@@ -319,6 +321,9 @@ export function NoteTree(p: NoteTreeProps) {
                 <CornerLeftUp size={14} /> Move to top level
               </button>
             )}
+            <button onClick={() => noteAction('toVault')}>
+              <Vault size={14} /> Move to vault…
+            </button>
             <div className="menu-sep" />
             <button onClick={() => noteAction('archive')}>
               <Archive size={14} /> Archive
@@ -341,6 +346,9 @@ export function NoteTree(p: NoteTreeProps) {
             </button>
             <button onClick={() => (setMenu(null), p.onNewFolder(menu.folder.id))}>
               <FolderPlus size={14} /> New subfolder
+            </button>
+            <button onClick={() => (setMenu(null), p.onMoveFolderToVault?.(menu.folder))}>
+              <Vault size={14} /> Move to vault…
             </button>
             <div className="menu-sep" />
             <button onClick={() => (setMenu(null), p.onRenameFolder(menu.folder))}>

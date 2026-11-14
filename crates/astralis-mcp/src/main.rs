@@ -7,23 +7,32 @@
 //!
 //!   astralis-mcp [--db <path>] [--profile <name>]
 
+#![recursion_limit = "512"]
+
+mod code;
+
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use astralis_core::Store;
 use astralis_core::agent_notes::{AgentAccess, NoteEdit};
+use astralis_core::agent_plan::{AgentEvent, AgentEventEdit, AgentTask, AgentTaskEdit};
 use astralis_core::memory::{MapEntry, MemoryKind, file_mtime};
 use serde_json::{Value, json};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const INSTRUCTIONS: &str = "Astralis Brain is this project's long-term memory (shared across sessions and AI tools). Use it to save tokens:
-1. At the start of a task, call brain_context once: a short index of what's already known (one line per memory).
+0. The Brain replaces digging through old chats. Never search or read earlier chat logs, session transcripts or history files (for example ~/.claude/projects) to find what was decided, learned or done before: ask the Brain. If it isn't there, ask the user or read the code, then save the answer so nobody has to look again.
+1. At the start of a task, call brain_context once, with the task in a sentence: a short index of what's already known (one line per memory).
 2. Before re-reading files, grepping, or asking the user something you may have learned before, try brain_recall (by meaning) or brain_map (which file does what). Read a memory in full with brain_read only if the trimmed lines aren't enough.
 3. When you learn something durable, save it with brain_remember: one idea per memory, a one-line hook that says the point, details only if needed. Good: decisions and why, gotchas, build/test commands, user preferences (scope \"me\" if they apply to every project), where things live. Don't save secrets, or anything obvious from the code or git history.
 4. When you work out what files do, record them with brain_map_note (path + one-line purpose). brain_map flags files changed since — re-read only those.
 5. If a memory turns out wrong or outdated, brain_update or brain_forget it.
-The user's own notes (their notes app) are there too, only when they ask for something about them: notes_search or notes_list to find a note, notes_read to read it, then notes_edit (prefer a small old_text/new_text replacement over rewriting the whole body), notes_create, notes_move, notes_delete, and the notes_folder_* tools. Every edit keeps the note's history, and deleting archives a note (the user can restore it) unless you delete an already-archived note with permanent.";
+6. Before you stop or at a natural pause, call brain_handoff: where things stand and what's next. It leads the next session's index, so nobody has to read this chat to continue.
+7. To see what's in a file, call code_outline (definitions with line numbers) and read only the lines you need; to find where something is defined, call code_find before grepping.
+The user's own notes (their notes app) are there too, only when they ask for something about them: notes_search or notes_list to find a note, notes_read to read it, then notes_edit (prefer a small old_text/new_text replacement over rewriting the whole body), notes_create, notes_move, notes_delete, and the notes_folder_* tools. Every edit keeps the note's history, and deleting archives a note (the user can restore it) unless you delete an already-archived note with permanent.
+The user's tasks and calendar work the same way, when they ask: plan_overview first (it also gives today's date and time), then planner_create to plan a project with its tasks, tasks_add / tasks_edit / tasks_list for to-dos, and calendar_add / calendar_edit / calendar_list for appointments and work sessions. Times are the user's local time (YYYY-MM-DD or YYYY-MM-DD HH:MM). Mark tasks done rather than deleting them.";
 
 fn data_dir() -> PathBuf {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default();
@@ -94,12 +103,12 @@ fn tools() -> Value {
     json!([
         {
             "name": "brain_context",
-            "description": "Short index of everything remembered about this project (and the user's general preferences): one line per memory with a [handle]. Call once at the start of a task.",
-            "inputSchema": { "type": "object", "properties": { "project": project } }
+            "description": "Short index of what's remembered about this project (and the user's general preferences): one line per memory with a [handle]. Call once at the start of a task, with the task in plain words so the relevant memories come first.",
+            "inputSchema": { "type": "object", "properties": { "project": project, "task": { "type": "string", "description": "What you're about to work on, in a sentence." } } }
         },
         {
             "name": "brain_recall",
-            "description": "Search memories by meaning; returns the best few, each trimmed to its most relevant lines. Try this before re-reading files or old chats.",
+            "description": "Search memories by meaning; returns the best few, each trimmed to its most relevant lines. Use this INSTEAD of searching old chats, transcripts or logs for what was decided or learned before, and before re-reading files.",
             "inputSchema": { "type": "object", "properties": {
                 "query": { "type": "string", "description": "What you want to know, in plain words." },
                 "limit": { "type": "integer", "description": "Max memories (default 4).", "minimum": 1, "maximum": 12 },
@@ -121,6 +130,32 @@ fn tools() -> Value {
                 "scope": { "type": "string", "enum": ["project", "me"], "description": "\"me\" for preferences that apply to every project (default: project)." },
                 "project": project
             }, "required": ["type", "hook"] }
+        },
+        {
+            "name": "brain_handoff",
+            "description": "Save the hand-off note for this project: where things stand and what comes next, in a few lines (what's done, what's half-done, the next step, what to watch out for). It replaces the previous note and is shown first in brain_context, so the next session continues without reading this chat. Call it before you stop or at a natural pause.",
+            "inputSchema": { "type": "object", "properties": {
+                "text": { "type": "string", "description": "A few lines, under about 1,400 characters." },
+                "project": project
+            }, "required": ["text"] }
+        },
+        {
+            "name": "code_outline",
+            "description": "The definitions in one file (functions, types, classes, headings…) with line numbers and signatures: a few hundred tokens instead of the whole file. Read the outline first, then read only the lines you need.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "File path, relative to the project root." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 400, "description": "Most definitions to list (default 120)." },
+                "project": project
+            }, "required": ["path"] }
+        },
+        {
+            "name": "code_find",
+            "description": "Where a function, type, class or constant is defined, anywhere in the project: path:line and its signature. Use it before grepping.",
+            "inputSchema": { "type": "object", "properties": {
+                "name": { "type": "string", "description": "The identifier, e.g. brain_recall or SyncScope." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 60, "description": "Most results (default 20)." },
+                "project": project
+            }, "required": ["name"] }
         },
         {
             "name": "brain_update",
@@ -254,6 +289,69 @@ fn tools() -> Value {
             "name": "notes_restore",
             "description": "Bring an archived note back.",
             "inputSchema": { "type": "object", "properties": { "note": note }, "required": ["note"] }
+        },
+        {
+            "name": "plan_overview",
+            "description": "The user's planners (projects) with progress, and the current local date and time. Start here for anything about tasks, to-dos or the calendar.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "planner_create",
+            "description": "Make a planner (e.g. for building an app) with its tasks in one call: break the work into concrete steps, with priorities and due dates when they know them.",
+            "inputSchema": { "type": "object", "properties": {
+                "name": { "type": "string" }, "description": { "type": "string" },
+                "tasks": { "type": "array", "items": { "type": "object", "properties": { "title": { "type": "string" }, "notes": { "type": "string", "description": "Details." }, "status": { "type": "string", "enum": ["todo","doing","done"] }, "priority": { "type": "string", "enum": ["none","low","medium","high","urgent"] }, "due": { "type": "string", "description": "YYYY-MM-DD (all day) or YYYY-MM-DD HH:MM, the user's local time." }, "remind": { "type": "string", "description": "When to remind: YYYY-MM-DD HH:MM." }, "repeat": { "type": "string", "description": "daily, weekly, monthly, yearly, \"2 weeks\"… (needs a due date)." } }, "required": ["title"] } }
+            }, "required": ["name"] }
+        },
+        {
+            "name": "planner_update",
+            "description": "Rename a planner or change its description.",
+            "inputSchema": { "type": "object", "properties": { "planner": { "type": "string" }, "name": { "type": "string" }, "description": { "type": "string" } }, "required": ["planner"] }
+        },
+        {
+            "name": "planner_delete",
+            "description": "Delete a planner. Its tasks are kept (unassigned) unless with_tasks is true.",
+            "inputSchema": { "type": "object", "properties": { "planner": { "type": "string" }, "with_tasks": { "type": "boolean" } }, "required": ["planner"] }
+        },
+        {
+            "name": "tasks_list",
+            "description": "The user's tasks as [handle] Title — details. Open tasks by default, most important first.",
+            "inputSchema": { "type": "object", "properties": { "planner": { "type": "string" }, "include_done": { "type": "boolean" }, "due_before": { "type": "string", "description": "Only tasks due before this date (YYYY-MM-DD) or time." }, "limit": { "type": "integer", "minimum": 1, "maximum": 300 } } }
+        },
+        {
+            "name": "tasks_add",
+            "description": "Add one or more tasks / to-dos.",
+            "inputSchema": { "type": "object", "properties": { "tasks": { "type": "array", "items": { "type": "object", "properties": { "title": { "type": "string" }, "notes": { "type": "string", "description": "Details." }, "status": { "type": "string", "enum": ["todo","doing","done"] }, "priority": { "type": "string", "enum": ["none","low","medium","high","urgent"] }, "due": { "type": "string", "description": "YYYY-MM-DD (all day) or YYYY-MM-DD HH:MM, the user's local time." }, "remind": { "type": "string", "description": "When to remind: YYYY-MM-DD HH:MM." }, "repeat": { "type": "string", "description": "daily, weekly, monthly, yearly, \"2 weeks\"… (needs a due date)." }, "planner": { "type": "string", "description": "Planner name or [handle]." } }, "required": ["title"] } } }, "required": ["tasks"] }
+        },
+        {
+            "name": "tasks_edit",
+            "description": "Change a task (by [handle] or title): rename, reschedule, set status (\"done\" ticks it off, and a repeating task moves to its next date), priority, planner. An empty due / remind / planner / repeat clears it.",
+            "inputSchema": { "type": "object", "properties": { "task": { "type": "string" }, "title": { "type": "string" }, "notes": { "type": "string", "description": "Details." }, "status": { "type": "string", "enum": ["todo","doing","done"] }, "priority": { "type": "string", "enum": ["none","low","medium","high","urgent"] }, "due": { "type": "string", "description": "YYYY-MM-DD (all day) or YYYY-MM-DD HH:MM, the user's local time." }, "remind": { "type": "string", "description": "When to remind: YYYY-MM-DD HH:MM." }, "repeat": { "type": "string", "description": "daily, weekly, monthly, yearly, \"2 weeks\"… (needs a due date)." }, "planner": { "type": "string", "description": "Planner name or [handle]." } }, "required": ["task"] }
+        },
+        {
+            "name": "tasks_delete",
+            "description": "Delete a task for good (prefer marking it done unless the user asked to delete it).",
+            "inputSchema": { "type": "object", "properties": { "task": { "type": "string" } }, "required": ["task"] }
+        },
+        {
+            "name": "calendar_list",
+            "description": "What's on the user's calendar between two dates: events and tasks due, including repeats.",
+            "inputSchema": { "type": "object", "properties": { "from": { "type": "string", "description": "YYYY-MM-DD or YYYY-MM-DD HH:MM" }, "to": { "type": "string", "description": "YYYY-MM-DD (through the end of that day) or YYYY-MM-DD HH:MM" } }, "required": ["from", "to"] }
+        },
+        {
+            "name": "calendar_add",
+            "description": "Put an event on the calendar (appointment, work session, trip). A date without a time makes an all-day event; a start time alone makes it an hour long.",
+            "inputSchema": { "type": "object", "properties": { "title": { "type": "string" }, "start": { "type": "string", "description": "YYYY-MM-DD or YYYY-MM-DD HH:MM, local time." }, "end": { "type": "string" }, "location": { "type": "string" }, "description": { "type": "string" }, "remind_minutes": { "type": "integer", "description": "Remind this many minutes before." } }, "required": ["title", "start"] }
+        },
+        {
+            "name": "calendar_edit",
+            "description": "Change an event (by [handle] or title). Moving only the start keeps its length.",
+            "inputSchema": { "type": "object", "properties": { "event": { "type": "string" }, "title": { "type": "string" }, "start": { "type": "string" }, "end": { "type": "string" }, "location": { "type": "string" }, "description": { "type": "string" }, "remind_minutes": { "type": "integer", "description": "Negative removes the reminder." } }, "required": ["event"] }
+        },
+        {
+            "name": "calendar_delete",
+            "description": "Remove an event from the calendar.",
+            "inputSchema": { "type": "object", "properties": { "event": { "type": "string" } }, "required": ["event"] }
         }
     ])
 }
@@ -278,7 +376,7 @@ impl Server {
         match name {
             "brain_context" => {
                 let (folder, root) = self.project(args)?;
-                self.store.brain_context(folder, Some(&root)).map_err(err)
+                self.store.brain_context_for(folder, Some(&root), s(&args["task"]).as_deref()).map_err(err)
             }
             "brain_recall" => {
                 let (folder, _) = self.project(args)?;
@@ -294,7 +392,29 @@ impl Server {
                 let folder = if s(&args["scope"]).as_deref() == Some("me") { self.store.brain_me().map_err(err)? } else { self.project(args)?.0 };
                 let (m, merged) = self.store.remember(folder, kind, &hook, &details, &self.source.clone()).map_err(err)?;
                 self.after_write();
-                Ok(if merged { format!("Updated [{}] (it already covered this).", m.short) } else { format!("Saved [{}].", m.short) })
+                let mut reply = if merged { format!("Updated [{}] (it already covered this).", m.short) } else { format!("Saved [{}].", m.short) };
+                // Memories on the same thing that weren't merged: the agent should check for a conflict.
+                if !merged && let Ok(similar) = self.store.brain_similar(folder, &m.hook, &m.content, Some(m.id)) && !similar.is_empty() {
+                    let list: Vec<String> = similar.iter().map(|o| format!("[{}] {}", o.short, o.hook)).collect();
+                    reply.push_str(&format!(" Similar memories already exist: {}. If this replaces or contradicts one, brain_update that one (or brain_forget the wrong one) instead of keeping both.", list.join("; ")));
+                }
+                Ok(reply)
+            }
+            "brain_handoff" => {
+                let (folder, _) = self.project(args)?;
+                let m = self.store.brain_handoff_save(folder, &s(&args["text"]).ok_or("text is required")?, &self.source.clone()).map_err(err)?;
+                self.after_write();
+                Ok(format!("Hand-off saved ([{}]). It's the first thing the next session sees.", m.short))
+            }
+            "code_outline" => {
+                let (_, root) = self.project(args)?;
+                let limit = args["limit"].as_u64().unwrap_or(120).clamp(1, 400) as usize;
+                code::outline(&root, &s(&args["path"]).ok_or("path is required")?, limit)
+            }
+            "code_find" => {
+                let (_, root) = self.project(args)?;
+                let limit = args["limit"].as_u64().unwrap_or(20).clamp(1, 60) as usize;
+                code::find(&root, &s(&args["name"]).ok_or("name is required")?, limit)
             }
             "brain_update" => {
                 let id = s(&args["id"]).ok_or("id is required")?;
@@ -333,6 +453,7 @@ impl Server {
                 Ok(format!("Code map updated ({n} files)."))
             }
             n if n.starts_with("notes_") => self.notes(n, args),
+            n if n.starts_with("plan") || n.starts_with("tasks_") || n.starts_with("calendar_") => self.plan(n, args),
             other => Err(format!("unknown tool {other}")),
         }
     }
@@ -400,6 +521,62 @@ impl Server {
         }
     }
 
+    /// Tasks, planners and the calendar. Brain → Connect in the app decides what agents may do.
+    fn plan(&mut self, name: &str, args: &Value) -> Result<String, String> {
+        let s = |v: &Value| v.as_str().map(str::to_owned);
+        let err = |e: astralis_core::Error| e.to_string();
+        let writes = !matches!(name, "plan_overview" | "tasks_list" | "calendar_list");
+        match self.store.agent_plan_access().map_err(err)? {
+            AgentAccess::Off => return Err("The user has turned off AI access to their tasks and calendar (Astralis → Brain → Connect).".into()),
+            AgentAccess::Read if writes => return Err("The user lets AI agents read their tasks and calendar but not change them (Astralis → Brain → Connect). Suggest the change to the user instead.".into()),
+            _ => {}
+        }
+        let task_of = |t: &Value| AgentTask {
+            title: s(&t["title"]).unwrap_or_default(),
+            notes: s(&t["notes"]),
+            status: s(&t["status"]),
+            priority: s(&t["priority"]),
+            due: s(&t["due"]),
+            remind: s(&t["remind"]),
+            repeat: s(&t["repeat"]),
+            planner: s(&t["planner"]),
+        };
+        let need = |k: &str| s(&args[k]).ok_or(format!("{k} is required"));
+        match name {
+            "plan_overview" => self.store.agent_planners().map_err(err),
+            "planner_create" => {
+                let tasks: Vec<AgentTask> = args["tasks"].as_array().map(|a| a.iter().map(task_of).collect()).unwrap_or_default();
+                self.store.agent_planner_create(&need("name")?, &s(&args["description"]).unwrap_or_default(), &tasks).map_err(err)
+            }
+            "planner_update" => self.store.agent_planner_update(&need("planner")?, s(&args["name"]).as_deref(), s(&args["description"]).as_deref()).map_err(err),
+            "planner_delete" => self.store.agent_planner_delete(&need("planner")?, args["with_tasks"].as_bool().unwrap_or(false)).map_err(err),
+            "tasks_list" => {
+                let limit = args["limit"].as_u64().unwrap_or(60).clamp(1, 300) as usize;
+                self.store.agent_tasks(s(&args["planner"]).as_deref(), args["include_done"].as_bool().unwrap_or(false), s(&args["due_before"]).as_deref(), limit).map_err(err)
+            }
+            "tasks_add" => {
+                let tasks: Vec<AgentTask> = args["tasks"].as_array().ok_or("tasks must be a list of {title, …}")?.iter().map(task_of).collect();
+                self.store.agent_tasks_add(&tasks).map_err(err)
+            }
+            "tasks_edit" => {
+                let e = AgentTaskEdit { title: s(&args["title"]), notes: s(&args["notes"]), status: s(&args["status"]), priority: s(&args["priority"]), due: s(&args["due"]), remind: s(&args["remind"]), repeat: s(&args["repeat"]), planner: s(&args["planner"]) };
+                self.store.agent_task_edit(&need("task")?, &e).map_err(err)
+            }
+            "tasks_delete" => self.store.agent_task_delete(&need("task")?).map_err(err),
+            "calendar_list" => self.store.agent_calendar(&need("from")?, &need("to")?).map_err(err),
+            "calendar_add" => {
+                let ev = AgentEvent { title: need("title")?, start: need("start")?, end: s(&args["end"]), location: s(&args["location"]), description: s(&args["description"]), remind_minutes: args["remind_minutes"].as_i64() };
+                self.store.agent_event_add(&ev).map_err(err)
+            }
+            "calendar_edit" => {
+                let ed = AgentEventEdit { title: s(&args["title"]), start: s(&args["start"]), end: s(&args["end"]), location: s(&args["location"]), description: s(&args["description"]), remind_minutes: args["remind_minutes"].as_i64() };
+                self.store.agent_event_edit(&need("event")?, &ed).map_err(err)
+            }
+            "calendar_delete" => self.store.agent_event_delete(&need("event")?).map_err(err),
+            other => Err(format!("unknown tool {other}")),
+        }
+    }
+
     fn handle(&mut self, msg: &Value) -> Option<Value> {
         let id = msg.get("id").cloned()?; // notifications get no reply
         let method = msg["method"].as_str().unwrap_or("");
@@ -448,6 +625,94 @@ impl Server {
     }
 }
 
+/// Commands for agent hooks (`astralis-mcp hook <event>`): they read the hook's JSON from stdin and
+/// print what should be added to the agent's context, so the Brain is used without the agent having
+/// to remember to ask. Always exit quietly: a hook must never get in the way of the session.
+fn run_hook(event: &str, db: &Path) {
+    use std::io::Read;
+    let mut raw = String::new();
+    let _ = std::io::stdin().read_to_string(&mut raw);
+    let input: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    if let Some(text) = hook_output(event, &input, db) {
+        println!("{text}");
+    }
+}
+
+/// What a hook should add to the agent's context (nothing is `None`).
+fn hook_output(event: &str, input: &Value, db: &Path) -> Option<String> {
+    let cwd = input["cwd"].as_str().map(PathBuf::from).or_else(|| std::env::var_os("CLAUDE_PROJECT_DIR").map(PathBuf::from)).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+    let mut store = Store::open(db).ok()?;
+    let project = detect_project(&cwd);
+    let folder = store.brain_project(&project.key, &project.name).ok()?;
+    match event {
+        // The index of what's remembered, at the start of a session (and after /clear or compaction).
+        "session-start" => store.brain_context_for(folder, Some(&project.root), None).ok(),
+        // Memories that clearly match the message just sent; nothing when none do, and nothing
+        // that this session was already given (it would only cost tokens again).
+        "prompt" => {
+            let prompt = input["prompt"].as_str()?;
+            let session = input["session_id"].as_str().unwrap_or("");
+            let mut seen = hook_seen(db, session);
+            let (text, handles) = store.brain_hook_prompt_new(folder, prompt, &seen).ok()??;
+            seen.extend(handles);
+            remember_hook_seen(db, session, &seen);
+            Some(text)
+        }
+        // When the agent is about to finish: once, remind it to save what it learned.
+        "stop" => {
+            if input["stop_hook_active"].as_bool().unwrap_or(false) || !save_reminder_due(db, &project.key) {
+                return None;
+            }
+            Some(json!({ "decision": "block", "reason": "Before you finish: if this session settled a decision, hit a gotcha, or worked out a command or where something lives, save it now with brain_remember (one idea per memory, a one-line hook that states the point), and update the hand-off note with brain_handoff (what's done, what's next), so no one has to dig through this chat later. If there is nothing worth saving, just finish." }).to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Handles of the memories already added to this session's messages (kept for the last 30 sessions).
+fn hook_seen(db: &Path, session: &str) -> std::collections::HashSet<String> {
+    if session.is_empty() {
+        return Default::default();
+    }
+    let file = db.parent().map(|d| d.join("brain-hook-seen.json")).unwrap_or_default();
+    let all: serde_json::Map<String, Value> = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    all.get(session).and_then(|v| v["h"].as_array()).map(|a| a.iter().filter_map(|h| h.as_str().map(str::to_owned)).collect()).unwrap_or_default()
+}
+
+fn remember_hook_seen(db: &Path, session: &str, seen: &std::collections::HashSet<String>) {
+    if session.is_empty() {
+        return;
+    }
+    let file = db.parent().map(|d| d.join("brain-hook-seen.json")).unwrap_or_default();
+    let mut all: serde_json::Map<String, Value> = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let mut handles: Vec<&String> = seen.iter().collect();
+    handles.sort();
+    all.insert(session.to_string(), json!({ "t": now, "h": handles }));
+    if all.len() > 30 {
+        let mut by_age: Vec<(String, u64)> = all.iter().map(|(k, v)| (k.clone(), v["t"].as_u64().unwrap_or(0))).collect();
+        by_age.sort_by_key(|(_, t)| *t);
+        for (k, _) in by_age.into_iter().take(all.len() - 30) {
+            all.remove(&k);
+        }
+    }
+    let _ = std::fs::write(&file, Value::Object(all).to_string());
+}
+
+/// The save reminder runs at most once every 20 minutes per project (it costs the agent a turn).
+fn save_reminder_due(db: &Path, key: &str) -> bool {
+    let dir = db.parent().map(Path::to_path_buf).unwrap_or_default();
+    let file = dir.join("brain-reminders.json");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let mut seen: serde_json::Map<String, Value> = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    if seen.get(key).and_then(Value::as_u64).is_some_and(|t| now.saturating_sub(t) < 20 * 60) {
+        return false;
+    }
+    seen.insert(key.to_string(), json!(now));
+    let _ = std::fs::write(&file, Value::Object(seen).to_string());
+    true
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut db: Option<PathBuf> = None;
@@ -479,6 +744,13 @@ fn main() {
             None => dir.join("astralis.db"),
         }
     });
+    // `astralis-mcp hook <event>`: for agent hooks (see run_hook), not the MCP server.
+    if let Some(pos) = std::env::args().position(|a| a == "hook") {
+        if let Some(event) = std::env::args().nth(pos + 1) {
+            run_hook(&event, &db);
+        }
+        return;
+    }
     let store = match Store::open(&db) {
         Ok(s) => s,
         Err(e) => {
@@ -509,5 +781,53 @@ fn main() {
             let _ = writeln!(out, "{r}");
             let _ = out.flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+
+    /// A project folder and a database, both in a fresh temp folder.
+    fn setup(tag: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("astralis-hooks-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("proj/.git")).unwrap();
+        (dir.join("proj"), dir.join("astralis.db"))
+    }
+
+    #[test]
+    fn hooks_give_the_index_then_only_new_relevant_memories_and_one_reminder() {
+        let (proj, db) = setup("flow");
+        let cwd = proj.to_string_lossy().to_string();
+        {
+            let mut store = Store::open(&db).unwrap();
+            let project = detect_project(&proj);
+            let folder = store.brain_project(&project.key, &project.name).unwrap();
+            store.remember(folder, MemoryKind::Gotcha, "Python is broken on this machine", "Use node for scripted edits instead of python.", "claude-code").unwrap();
+        }
+        let input = |extra: Value| {
+            let mut v = json!({ "cwd": cwd, "session_id": "s1" });
+            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            v
+        };
+        // Session start: the index (with the rule), including what's remembered.
+        let start = hook_output("session-start", &input(json!({})), &db).expect("an index");
+        assert!(start.contains("Python is broken") && start.contains("not old chats"), "{start}");
+        // A relevant message gets the memory; the same memory isn't added to the next message.
+        let first = hook_output("prompt", &input(json!({ "prompt": "write a python script to edit these files" })), &db).expect("recalled");
+        assert!(first.contains("Python is broken"), "{first}");
+        assert!(hook_output("prompt", &input(json!({ "prompt": "another python script for editing more files" })), &db).is_none(), "already given this session");
+        // Another session is given it again; unrelated or empty messages add nothing.
+        let other = json!({ "cwd": cwd, "session_id": "s2", "prompt": "write a python script to edit these files" });
+        assert!(hook_output("prompt", &other, &db).is_some());
+        assert!(hook_output("prompt", &input(json!({ "prompt": "thanks, that works" })), &db).is_none());
+        // The save reminder: once, never while already continuing from one.
+        assert!(hook_output("stop", &input(json!({ "stop_hook_active": true })), &db).is_none());
+        let stop = hook_output("stop", &input(json!({ "stop_hook_active": false })), &db).expect("reminder");
+        assert!(stop.contains("\"decision\":\"block\"") && stop.contains("brain_handoff"));
+        assert!(hook_output("stop", &input(json!({ "stop_hook_active": false })), &db).is_none(), "rate limited");
+        assert!(hook_output("nonsense", &input(json!({})), &db).is_none());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 }
