@@ -153,6 +153,21 @@ android_emulator() {
         export JAVA_HOME="$base/jdk" PATH="$base/jdk/bin:$PATH"
     fi
 
+    # The emulator needs libxkbfile. If the system doesn't have it (and there's no package manager
+    # to ask), keep a private copy from Debian next to the rest.
+    if ! ldconfig -p 2>/dev/null | grep -q 'libxkbfile\.so\.1'; then
+        if [[ ! -e "$base/libs/libxkbfile.so.1" ]]; then
+            echo "Downloading libxkbfile (one time)…"
+            local deb="libxkbfile1_1.1.0-1+b5_amd64.deb" tmp
+            tmp="$(mktemp -d)"
+            curl -fsSL -o "$tmp/$deb" "https://deb.debian.org/debian/pool/main/libx/libxkbfile/$deb"
+            (cd "$tmp" && bsdtar -xf "$deb" && bsdtar -xf data.tar.*)
+            mkdir -p "$base/libs" && cp -a "$tmp"/usr/lib/x86_64-linux-gnu/libxkbfile.so* "$base/libs/"
+            rm -rf "$tmp"
+        fi
+        export LD_LIBRARY_PATH="$base/libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
+
     local sdkm="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
     if [[ ! -x "$sdkm" ]]; then
         echo "Downloading the Android command-line tools (one time)…"
@@ -199,7 +214,7 @@ android_emulator() {
             if ! kill -0 "$epid" 2>/dev/null; then
                 echo "The emulator stopped. Its log ($base/emulator.log):" >&2
                 tail -8 "$base/emulator.log" >&2
-                echo "On Arch a missing library is fixed with:  sudo pacman -S --needed libxkbfile" >&2
+                echo "A missing system library shows up above as: error while loading shared libraries." >&2
                 exit 1
             fi
             sleep 2
