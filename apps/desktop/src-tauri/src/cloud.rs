@@ -26,10 +26,15 @@ const EMAIL: &str = "google.email";
 const SYNC_EVERY: Duration = Duration::from_secs(30);
 
 /// Google sign-in state held in memory.
-#[derive(Default)]
 pub struct Cloud {
     http: reqwest::Client,
     tokens: tokio::sync::Mutex<Option<Tokens>>,
+}
+
+impl Default for Cloud {
+    fn default() -> Self {
+        Self { http: astralis_cloud::http_client(), tokens: Default::default() }
+    }
 }
 
 fn err(e: impl std::fmt::Display) -> Error {

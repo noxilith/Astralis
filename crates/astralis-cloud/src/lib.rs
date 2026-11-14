@@ -195,12 +195,20 @@ mod tests;
 pub fn http_client() -> reqwest::Client {
     #[cfg(target_os = "android")]
     {
-        let certs: Vec<reqwest::Certificate> = webpki_root_certs::TLS_SERVER_ROOT_CERTS
-            .iter()
-            .filter_map(|c| reqwest::Certificate::from_der(c.as_ref()).ok())
-            .collect();
-        if let Ok(client) = reqwest::Client::builder().tls_certs_only(certs).build() {
-            return client;
+        use std::sync::Arc;
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        match rustls::ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions() {
+            Ok(builder) => {
+                let mut config = builder.with_root_certificates(roots).with_no_client_auth();
+                config.alpn_protocols = vec![b"http/1.1".to_vec()];
+                match reqwest::Client::builder().use_preconfigured_tls(config).build() {
+                    Ok(client) => return client,
+                    Err(e) => eprintln!("astralis: couldn't set up secure requests: {e:#}"),
+                }
+            }
+            Err(e) => eprintln!("astralis: couldn't set up secure requests: {e:#}"),
         }
     }
     reqwest::Client::new()

@@ -20,4 +20,5 @@ uuid = { version = "1.29.1", features = ["serde", "v7"] }
 # On Android the system's certificate store isn't reachable from Rust without extra Java setup, so
 # secure requests use Mozilla's bundled list of trusted certificate authorities instead.
 [target.'cfg(target_os = "android")'.dependencies]
-webpki-root-certs = "1"
+webpki-roots = "1"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }

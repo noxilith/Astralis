@@ -233,13 +233,14 @@ dependencies = [
  "astralis-core",
  "base64 0.23.1",
  "reqwest 0.13.5",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tokio",
  "tracing",
  "uuid",
- "webpki-root-certs",
+ "webpki-roots",
 ]
 
 [[package]]
