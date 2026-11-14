@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { ArrowUpCircle, CheckCircle2, Download, ExternalLink, RefreshCw } from 'lucide-react'
 import { api, type UpdateInfo } from '../api'
+import { PHONE } from '../lib/platform'
 import { useApp } from '../context'
 import { Markdown } from './Markdown'
 
@@ -14,7 +15,7 @@ let checkedAtStart = false
 export function useStartupUpdateCheck() {
   const { toast, setView } = useApp()
   useEffect(() => {
-    if (checkedAtStart) return
+    if (checkedAtStart || PHONE) return
     const timer = setTimeout(async () => {
       // Once per run (set here, not before the timer: a cancelled timer mustn't count).
       if (checkedAtStart) return

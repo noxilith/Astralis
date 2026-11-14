@@ -937,3 +937,41 @@ img.assistant-orb.avatar, .assistant-orb.avatar-preview img { object-fit: cover;
 .assistant-orb.avatar-preview { display: inline-grid; place-items: center; overflow: hidden; }
 .assistant-orb.avatar-preview img { width: 100%; height: 100%; }
 img.assistant-orb.avatar { background: var(--bg-elev-2); }
+
+/* ---------- phone layout (see MobileShell) ---------- */
+:root { --m-tabs-h: calc(58px + env(safe-area-inset-bottom)); }
+html { -webkit-text-size-adjust: 100%; }
+.app.compact { display: block; height: 100dvh; position: relative; overflow: hidden; }
+.m-main { height: calc(100dvh - var(--m-tabs-h)); padding-top: env(safe-area-inset-top); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.m-tabs {
+  position: fixed; left: 0; right: 0; bottom: 0; height: var(--m-tabs-h); padding-bottom: env(safe-area-inset-bottom);
+  display: grid; grid-template-columns: repeat(5, 1fr); background: var(--bg-elev); border-top: 1px solid var(--border); z-index: 30;
+}
+.m-tab { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; border: 0; background: none; color: var(--text-faint); font-size: 11px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.m-tab.active { color: var(--accent-strong); }
+.m-badge { position: absolute; top: 6px; left: calc(50% + 6px); min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--accent); color: #fff; font-size: 10px; font-style: normal; display: grid; place-items: center; }
+.m-list-screen { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.m-list-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px 6px; }
+.m-list-screen .notes-nav { flex: 1; min-height: 0; }
+.m-bar { display: flex; align-items: center; padding: 2px 6px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.m-back { display: inline-flex; align-items: center; gap: 2px; border: 0; background: none; color: var(--accent-strong); font-size: 16px; padding: 10px 8px 10px 2px; cursor: pointer; }
+.m-content { flex: 1; min-height: 0; overflow: hidden; }
+.m-content > * { height: 100%; }
+.m-more-backdrop { position: fixed; inset: 0; z-index: 39; }
+.m-more { position: fixed; right: 10px; bottom: calc(var(--m-tabs-h) + 8px); z-index: 40; min-width: 210px; padding: 6px; display: flex; flex-direction: column; background: var(--bg-elev-2); border: 1px solid var(--border-strong); border-radius: 14px; box-shadow: var(--shadow); }
+.m-more-item { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border: 0; background: none; border-radius: 10px; font-size: 16px; text-align: left; cursor: pointer; }
+.m-more-item:active { background: var(--bg-hover); }
+/* Notes and the editor, one column; the side panel slides up over the note. */
+.compact .split, .compact .split-editor { grid-template-columns: minmax(0, 1fr) !important; }
+.compact .side-pane.sheet { position: fixed; left: 0; right: 0; bottom: var(--m-tabs-h); top: 14%; z-index: 35; background: var(--bg-elev); border-radius: 16px 16px 0 0; box-shadow: 0 -12px 40px rgba(0, 0, 0, .5); overflow: auto; }
+.compact .editor-toolbar { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; }
+.compact .editor-toolbar::-webkit-scrollbar { display: none; }
+.compact .editor-toolbar > * { flex-shrink: 0; }
+.compact .cm-scroller { padding: 14px 14px 120px; }
+.compact .preview { padding: 14px 16px 120px; }
+.compact input:not([type='checkbox']):not([type='radio']):not([type='color']), .compact textarea, .compact select { font-size: 16px; } /* iOS zooms in on smaller text */
+.compact .tree-row, .compact .list-item { min-height: 44px; }
+.compact .tree-action { display: inline-flex; } /* no hover on a phone: the row menu button is always there */
+.compact .modal, .compact .modal-card { max-width: calc(100vw - 20px); }
+.compact .find-panel, .compact .preview-find { width: calc(100% - 20px); margin-right: 10px; }
+.app.compact ~ .toasts, .compact .toasts { bottom: calc(var(--m-tabs-h) + 10px); right: 10px; left: 10px; }

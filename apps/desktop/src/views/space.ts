@@ -28,7 +28,7 @@ export interface SpaceHandle {
   /** Flies to the system with the most planets (for checking performance). */
   focusBiggestSystem(): void
   /** What the view is doing right now (for checking it works). */
-  debugState(): { hover: string | null; motion: number; time: number }
+  debugState(): { hover: string | null; motion: number; time: number; yaw: number; dist: number }
   /** Moves the camera closer (k < 1) or farther, at once (for checking performance). */
   zoomBy(k: number): void
 }
@@ -1655,6 +1655,65 @@ export function createSpace(el: HTMLCanvasElement, inputs: GalaxyInput[], onOpen
     if (e.ctrlKey || e.metaKey) zoom(Math.exp(clamp(e.deltaY * unit, -40, 40) * 0.006))
     else turn(-e.deltaX * unit * 0.5, -e.deltaY * unit * 0.5)
   }
+  // ---- touch: one finger turns the view (a tap picks), two fingers pinch to zoom and slide ----
+  el.style.touchAction = 'none'
+  let pinch: { dist: number; x: number; y: number } | null = null
+  const touchAt = (t: Touch) => {
+    const r = el.getBoundingClientRect()
+    return { x: t.clientX - r.left, y: t.clientY - r.top }
+  }
+  const pinchOf = (e: TouchEvent) => {
+    const a = touchAt(e.touches[0])
+    const b = touchAt(e.touches[1])
+    return { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+  }
+  const onTouchStart = (e: TouchEvent) => {
+    e.preventDefault()
+    idleSince = performance.now()
+    hover = null
+    if (e.touches.length === 1) {
+      const p = touchAt(e.touches[0])
+      drag = { x: p.x, y: p.y, moved: false, slide: false }
+      pinch = null
+    } else if (e.touches.length === 2) {
+      drag = null
+      pinch = pinchOf(e)
+    }
+  }
+  const onTouchMove = (e: TouchEvent) => {
+    e.preventDefault()
+    if (e.touches.length === 1 && drag) {
+      const p = touchAt(e.touches[0])
+      const dx = p.x - drag.x
+      const dy = p.y - drag.y
+      if (Math.abs(dx) + Math.abs(dy) > 6) drag.moved = true
+      drag.x = p.x
+      drag.y = p.y
+      if (drag.moved) {
+        turn(dx, dy)
+        view.yaw = goal.yaw
+        view.pitch = goal.pitch
+      }
+    } else if (e.touches.length === 2 && pinch) {
+      const now = pinchOf(e)
+      zoom(pinch.dist / now.dist)
+      slide(now.x - pinch.x, now.y - pinch.y)
+      pinch = now
+    }
+  }
+  const onTouchEnd = (e: TouchEvent) => {
+    e.preventDefault()
+    if (drag && !drag.moved && e.touches.length === 0 && e.changedTouches.length === 1) {
+      // A tap: the same as a click.
+      const t = e.changedTouches[0]
+      onUp({ button: 0, clientX: t.clientX, clientY: t.clientY } as MouseEvent)
+    }
+    if (e.touches.length === 0) {
+      drag = null
+      pinch = null
+      el.classList.remove('dragging')
+    }
+  }
   let gestureScale = 1
   const onGestureStart = (e: Event) => {
     e.preventDefault()
@@ -1690,6 +1749,10 @@ export function createSpace(el: HTMLCanvasElement, inputs: GalaxyInput[], onOpen
   el.addEventListener('wheel', onWheel, { passive: false })
   el.addEventListener('gesturestart', onGestureStart)
   el.addEventListener('gesturechange', onGestureChange)
+  el.addEventListener('touchstart', onTouchStart, { passive: false })
+  el.addEventListener('touchmove', onTouchMove, { passive: false })
+  el.addEventListener('touchend', onTouchEnd, { passive: false })
+  el.addEventListener('touchcancel', onTouchEnd, { passive: false })
 
   // Arrive from the wide view, gliding into the current vault's galaxy.
   place()
@@ -1710,6 +1773,10 @@ export function createSpace(el: HTMLCanvasElement, inputs: GalaxyInput[], onOpen
       el.removeEventListener('wheel', onWheel)
       el.removeEventListener('gesturestart', onGestureStart)
       el.removeEventListener('gesturechange', onGestureChange)
+      el.removeEventListener('touchstart', onTouchStart)
+      el.removeEventListener('touchmove', onTouchMove)
+      el.removeEventListener('touchend', onTouchEnd)
+      el.removeEventListener('touchcancel', onTouchEnd)
     },
     flyTo(galaxyId) {
       const g = galaxies.find((x) => x.id === galaxyId)
@@ -1722,7 +1789,7 @@ export function createSpace(el: HTMLCanvasElement, inputs: GalaxyInput[], onOpen
       view.dist *= k
       goal.dist = view.dist
     },
-    debugState: () => ({ hover: hover?.title ?? null, motion, time }), // dev only
+    debugState: () => ({ hover: hover?.title ?? null, motion, time, yaw: view.yaw, dist: view.dist }), // dev only
     focusBiggestSystem() {
       const s = [...systems].sort((a, b) => b.bodies.length - a.bodies.length)[0]
       if (s) setFocus({ kind: 'system', s })

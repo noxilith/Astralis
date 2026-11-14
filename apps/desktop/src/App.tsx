@@ -17,6 +17,8 @@ import { SettingsView } from './views/SettingsView'
 import { useStartupUpdateCheck } from './components/Updates'
 import { MINUTE } from './lib/time'
 import { useAppearance } from './lib/theme'
+import { useCompact } from './lib/platform'
+import { MobileShell } from './components/MobileShell'
 import { applyNoteWidth, loadNoteWidth } from './lib/noteWidth'
 
 
@@ -37,6 +39,7 @@ function Shell() {
     return () => window.removeEventListener("astralis-error", onError)
   }, [fail])
   const { theme, setTheme, accent, setAccent, base: themeBase, matugen } = useAppearance()
+  const compact = useCompact()
   // The saved "fill the whole width" choice for notes.
   useEffect(() => {
     void loadNoteWidth().then(applyNoteWidth)
@@ -94,18 +97,29 @@ function Shell() {
     return () => window.removeEventListener('keydown', onKey)
   }, [paletteOpen, setPaletteOpen, newNote, setView])
 
-  return (
+  const screens = (
+    <>
+      {view === 'notes' && <NoteEditor theme={themeBase} />}
+      {(view === 'tasks' || view === 'calendar' || view === 'planners') && <Productivity view={view} />}
+      {view === 'graph' && <GraphView />}
+      {view === 'brain' && <BrainView />}
+      {view === 'templates' && <TemplatesView />}
+      {view === 'settings' && <SettingsView theme={theme} setTheme={setTheme} accent={accent} setAccent={setAccent} matugenPath={matugen.path} matugenFound={!!matugen.colors} />}
+    </>
+  )
+
+  return compact ? (
+    <>
+      <MobileShell>{screens}</MobileShell>
+      <QuickNote />
+      {paletteOpen && <CommandPalette onNewNote={newNote} onNewWhiteboard={newWhiteboard} />}
+      <Toasts />
+    </>
+  ) : (
     <div className="app">
       <Sidebar />
       <main className="main">
-        <div className="main-content">
-        {view === 'notes' && <NoteEditor theme={themeBase} />}
-        {(view === 'tasks' || view === 'calendar' || view === 'planners') && <Productivity view={view} />}
-        {view === 'graph' && <GraphView />}
-        {view === 'brain' && <BrainView />}
-        {view === 'templates' && <TemplatesView />}
-        {view === 'settings' && <SettingsView theme={theme} setTheme={setTheme} accent={accent} setAccent={setAccent} matugenPath={matugen.path} matugenFound={!!matugen.colors} />}
-        </div>
+        <div className="main-content">{screens}</div>
         <QuickNote />
       </main>
       {paletteOpen && <CommandPalette onNewNote={newNote} onNewWhiteboard={newWhiteboard} />}

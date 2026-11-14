@@ -35,6 +35,7 @@ import { folderPath } from '../components/NotesNav'
 import { Empty, Modal, Spinner, useConfirm, useDebounced, usePrompt } from '../components/ui'
 import { relativeTime } from '../lib/time'
 import { NotePanel } from './NotePanel'
+import { COMPACT_WIDTH, PHONE, useCompact } from '../lib/platform'
 import { AssistantPanel } from '../components/AssistantPanel'
 import { HistoryModal } from './HistoryModal'
 
@@ -52,11 +53,13 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
   const [preview, setPreview] = useState(false)
   const [findOpen, setFindOpen] = useState(false)
   const previewHost = useRef<HTMLDivElement>(null)
-  const [showPanel, setShowPanel] = useState(true)
+  const compact = useCompact()
+  // On a phone the side panel starts closed (it opens over the note), and there's no chat.
+  const [showPanel, setShowPanel] = useState(() => !(PHONE || window.innerWidth <= COMPACT_WIDTH))
   // The side panel's tab: the note's details, or the chat with the built-in AI (remembered).
   const [tab, setTab] = useState<SideTab>(() => {
     try {
-      return localStorage.getItem(SIDE_TAB_KEY) === 'chat' ? 'chat' : 'details'
+      return !PHONE && localStorage.getItem(SIDE_TAB_KEY) === 'chat' ? 'chat' : 'details'
     } catch {
       return 'details'
     }
@@ -512,14 +515,16 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
       </div>
 
       {panel && (
-        <div className="pane side-pane">
+        <div className={'pane side-pane' + (compact ? ' sheet' : '')}>
           <div className="side-tabs" role="tablist">
             <button role="tab" aria-selected={tab === 'details'} className={tab === 'details' ? 'active' : ''} onClick={() => setTab('details')}>
               <Info size={14} /> Details
             </button>
-            <button role="tab" aria-selected={tab === 'chat'} className={tab === 'chat' ? 'active' : ''} onClick={() => setTab('chat')}>
-              <Sparkles size={14} /> Chat
-            </button>
+            {!PHONE && (
+              <button role="tab" aria-selected={tab === 'chat'} className={tab === 'chat' ? 'active' : ''} onClick={() => setTab('chat')}>
+                <Sparkles size={14} /> Chat
+              </button>
+            )}
           </div>
           <div className="side-body" hidden={tab !== 'details'}>
             {current.encrypted ? (
@@ -530,7 +535,7 @@ export function NoteEditor({ theme }: { theme: 'dark' | 'light' }) {
               <NotePanel note={current} readOnly={readOnly} onChange={(n, remount) => replaceCurrent(n, remount)} onOpenLink={openLink} />
             )}
           </div>
-          {chatMounted && (
+          {chatMounted && !PHONE && (
             <div className="side-body side-chat" hidden={tab !== 'chat'}>
               <AssistantPanel key={current.id} note={current} getSelection={selectedText} onApply={putIntoNote} />
             </div>

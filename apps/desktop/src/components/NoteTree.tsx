@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from 'react'
-import { Archive, ChevronDown, ChevronRight, Copy, CornerLeftUp, ExternalLink, Folder as FolderIcon, FolderOpen, FolderPlus, MoreHorizontal, Pencil, PenTool, Pin, PinOff, StickyNote, Trash2, Vault } from 'lucide-react'
+import { Archive, ChevronDown, ChevronRight, Copy, CornerLeftUp, ExternalLink, Folder as FolderIcon, FolderInput, FolderOpen, FolderPlus, MoreHorizontal, Pencil, PenTool, Pin, PinOff, StickyNote, Trash2, Vault } from 'lucide-react'
 import type { Folder, Id, Note } from '../api'
 import { useCollab, type Presence } from '../lib/collab'
 
@@ -13,7 +13,7 @@ type Target = Id | 'root' | 'pinned'
 const DRAG_START = 5
 
 /** What the right-click menu on a note can do. */
-export type NoteAction = 'open' | 'rename' | 'pin' | 'duplicate' | 'toTop' | 'toVault' | 'archive' | 'delete'
+export type NoteAction = 'open' | 'rename' | 'pin' | 'duplicate' | 'toTop' | 'toFolder' | 'toVault' | 'archive' | 'delete'
 
 /** Keeps a context menu on screen near the bottom/right edges. */
 const menuPos = (x: number, y: number, height: number) => ({
@@ -41,6 +41,8 @@ export interface NoteTreeProps {
   onDeleteFolder: (f: Folder) => void
   /** Right-click, "Move to vault…" on a folder. */
   onMoveFolderToVault?: (f: Folder) => void
+  /** "Move to folder…" on a folder (the way to move things on a touch screen, where dragging scrolls). */
+  onMoveFolderInto?: (f: Folder) => void
   /** Dropping a note on the Pinned section pins it. */
   onPinNote?: (noteId: Id) => void
   /** Right-click menu on a note. */
@@ -200,8 +202,40 @@ export function NoteTree(p: NoteTreeProps) {
     e.preventDefault()
     e.stopPropagation()
     setNoteMenu(null)
+    menuOpenedAt.current = Date.now()
     setMenu({ folder, x: e.clientX, y: e.clientY })
   }
+  // On a touch screen a long press is the right-click (iOS doesn't send one). The finger is still
+  // down when the menu opens, so the click that follows must not close it again.
+  const menuOpenedAt = useRef(0)
+  const longPress = (open: (x: number, y: number) => void) => {
+    let timer: number | undefined
+    let start = { x: 0, y: 0 }
+    const clear = () => {
+      if (timer) window.clearTimeout(timer)
+      timer = undefined
+    }
+    return {
+      onTouchStart: (e: React.TouchEvent) => {
+        const t = e.touches[0]
+        start = { x: t.clientX, y: t.clientY }
+        clear()
+        timer = window.setTimeout(() => {
+          timer = undefined
+          menuOpenedAt.current = Date.now()
+          navigator.vibrate?.(12)
+          open(start.x, start.y)
+        }, 480)
+      },
+      onTouchMove: (e: React.TouchEvent) => {
+        const t = e.touches[0]
+        if (Math.hypot(t.clientX - start.x, t.clientY - start.y) > 10) clear()
+      },
+      onTouchEnd: clear,
+      onTouchCancel: clear,
+    }
+  }
+  const justOpened = () => Date.now() - menuOpenedAt.current < 600
 
   const renderFolder = (f: Folder, depth: number): ReactNode => {
     const open = p.expanded.has(f.id)
@@ -218,6 +252,7 @@ export function NoteTree(p: NoteTreeProps) {
             p.onSelectFolder(f)
           }}
           onContextMenu={(e) => openMenu(e, f)}
+          {...longPress((x, y) => (setNoteMenu(null), setMenu({ folder: f, x, y })))}
         >
           <span className="tree-caret">{open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</span>
           <span className="tree-icon folder">{open ? <FolderOpen size={14} /> : <FolderIcon size={14} />}</span>
@@ -249,6 +284,7 @@ export function NoteTree(p: NoteTreeProps) {
         setMenu(null)
         setNoteMenu({ note: n, x: e.clientX, y: e.clientY })
       }}
+      {...longPress((x, y) => p.onNoteAction && (setMenu(null), setNoteMenu({ note: n, x, y })))}
       title={n.title || 'Untitled'}
     >
       <span className="tree-icon">{noteIcon(n)}</span>
@@ -302,7 +338,7 @@ export function NoteTree(p: NoteTreeProps) {
       )}
       {noteMenu && (
         <>
-          <div className="menu-backdrop" onClick={() => setNoteMenu(null)} onContextMenu={(e) => (e.preventDefault(), setNoteMenu(null))} />
+          <div className="menu-backdrop" onClick={() => !justOpened() && setNoteMenu(null)} onContextMenu={(e) => (e.preventDefault(), setNoteMenu(null))} />
           <div className="menu" style={{ position: 'fixed', ...menuPos(noteMenu.x, noteMenu.y, 300), right: 'auto' }}>
             <button onClick={() => noteAction('open')}>
               <ExternalLink size={14} /> Open
@@ -321,6 +357,9 @@ export function NoteTree(p: NoteTreeProps) {
                 <CornerLeftUp size={14} /> Move to top level
               </button>
             )}
+            <button onClick={() => noteAction('toFolder')}>
+              <FolderInput size={14} /> Move to folder…
+            </button>
             <button onClick={() => noteAction('toVault')}>
               <Vault size={14} /> Move to vault…
             </button>
@@ -336,7 +375,7 @@ export function NoteTree(p: NoteTreeProps) {
       )}
       {menu && (
         <>
-          <div className="menu-backdrop" onClick={() => setMenu(null)} onContextMenu={(e) => (e.preventDefault(), setMenu(null))} />
+          <div className="menu-backdrop" onClick={() => !justOpened() && setMenu(null)} onContextMenu={(e) => (e.preventDefault(), setMenu(null))} />
           <div className="menu" style={{ position: 'fixed', ...menuPos(menu.x, menu.y, 210), right: 'auto' }}>
             <button onClick={() => (setMenu(null), p.onNewNote(menu.folder.id, 'note'))}>
               <StickyNote size={14} /> New note here
@@ -346,6 +385,9 @@ export function NoteTree(p: NoteTreeProps) {
             </button>
             <button onClick={() => (setMenu(null), p.onNewFolder(menu.folder.id))}>
               <FolderPlus size={14} /> New subfolder
+            </button>
+            <button onClick={() => (setMenu(null), p.onMoveFolderInto?.(menu.folder))}>
+              <FolderInput size={14} /> Move to folder…
             </button>
             <button onClick={() => (setMenu(null), p.onMoveFolderToVault?.(menu.folder))}>
               <Vault size={14} /> Move to vault…

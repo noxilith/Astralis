@@ -6,6 +6,7 @@ import { GoogleDriveSettings } from '../components/GoogleDrive'
 import { UpdatesSection } from '../components/Updates'
 import { ACCENT_PRESETS, MATUGEN_CONFIG, MATUGEN_TEMPLATE, type Theme } from '../lib/theme'
 import { CopyBlock } from './BrainView'
+import { PHONE } from '../lib/platform'
 import { loadNoteWidth, saveNoteWidth, type NoteWidth } from '../lib/noteWidth'
 import { DEFAULT_NAME, avatarFromFile, setAssistantAvatar, setAssistantName, useAssistantProfile } from '../lib/assistantProfile'
 import { loadIgnored, onIgnoredChange, removeIgnored } from '../lib/ignored'
@@ -47,7 +48,7 @@ export function SettingsView({ theme, setTheme, accent, setAccent, matugenPath, 
         <div className="row">
           <button className={'btn' + (theme === 'dark' ? ' primary' : '')} onClick={() => setTheme('dark')}>Dark</button>
           <button className={'btn' + (theme === 'light' ? ' primary' : '')} onClick={() => setTheme('light')}>Light</button>
-          <button className={'btn' + (theme === 'matugen' ? ' primary' : '')} onClick={() => setTheme('matugen')} title="Colors from your wallpaper, made by matugen">Matugen</button>
+          {!PHONE && <button className={'btn' + (theme === 'matugen' ? ' primary' : '')} onClick={() => setTheme('matugen')} title="Colors from your wallpaper, made by matugen">Matugen</button>}
         </div>
         {theme === 'matugen' && (
           <div style={{ marginTop: 12 }}>
@@ -148,75 +149,81 @@ export function SettingsView({ theme, setTheme, accent, setAccent, matugenPath, 
           </div>
         )}
       </div>
-      <div className="section">
-        <h2>Assistant</h2>
-        <div className="row" style={{ gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span className="assistant-orb avatar-preview" style={{ width: 56, height: 56 }}>
-            {assistant.avatar ? <img src={assistant.avatar} alt="" /> : <Sparkles size={26} />}
-          </span>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 220 }}>
-            <label className="small muted" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              Name
-              <input
-                className="input"
-                value={nameDraft ?? assistant.name}
-                maxLength={30}
-                placeholder={DEFAULT_NAME}
-                onChange={(e) => setNameDraft(e.target.value)}
-                onBlur={() => (nameDraft !== null && setAssistantName(nameDraft), setNameDraft(null))}
-                onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
-              />
-            </label>
-            <div className="row" style={{ gap: 6 }}>
-              <label className="btn" style={{ cursor: 'pointer' }}>
-                Choose picture…
+      {!PHONE && (
+        <div className="section">
+          <h2>Assistant</h2>
+          <div className="row" style={{ gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span className="assistant-orb avatar-preview" style={{ width: 56, height: 56 }}>
+              {assistant.avatar ? <img src={assistant.avatar} alt="" /> : <Sparkles size={26} />}
+            </span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 220 }}>
+              <label className="small muted" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                Name
                 <input
-                  type="file"
-                  accept="image/*"
-                  hidden
-                  onChange={(e) => {
-                    const f = e.target.files?.[0]
-                    e.target.value = ''
-                    if (!f) return
-                    setAvatarError('')
-                    avatarFromFile(f).then(setAssistantAvatar).catch((err: Error) => setAvatarError(err.message))
-                  }}
+                  className="input"
+                  value={nameDraft ?? assistant.name}
+                  maxLength={30}
+                  placeholder={DEFAULT_NAME}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onBlur={() => (nameDraft !== null && setAssistantName(nameDraft), setNameDraft(null))}
+                  onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
                 />
               </label>
-              {assistant.avatar && <button className="btn ghost" onClick={() => setAssistantAvatar(null)}>Remove</button>}
-              {(assistant.name !== DEFAULT_NAME) && <button className="btn ghost" onClick={() => (setNameDraft(null), setAssistantName(DEFAULT_NAME))}>Reset name</button>}
+              <div className="row" style={{ gap: 6 }}>
+                <label className="btn" style={{ cursor: 'pointer' }}>
+                  Choose picture…
+                  <input
+                    type="file"
+                    accept="image/*"
+                    hidden
+                    onChange={(e) => {
+                      const f = e.target.files?.[0]
+                      e.target.value = ''
+                      if (!f) return
+                      setAvatarError('')
+                      avatarFromFile(f).then(setAssistantAvatar).catch((err: Error) => setAvatarError(err.message))
+                    }}
+                  />
+                </label>
+                {assistant.avatar && <button className="btn ghost" onClick={() => setAssistantAvatar(null)}>Remove</button>}
+                {(assistant.name !== DEFAULT_NAME) && <button className="btn ghost" onClick={() => (setNameDraft(null), setAssistantName(DEFAULT_NAME))}>Reset name</button>}
+              </div>
+              {avatarError && <span className="small" style={{ color: 'var(--danger)' }}>{avatarError}</span>}
             </div>
-            {avatarError && <span className="small" style={{ color: 'var(--danger)' }}>{avatarError}</span>}
           </div>
+          <p className="small muted" style={{ margin: '10px 0 0' }}>Shown in the note chat. The picture is cropped to a square and kept on this device.</p>
         </div>
-        <p className="small muted" style={{ margin: '10px 0 0' }}>Shown in the note chat. The picture is cropped to a square and kept on this device.</p>
-      </div>
-      <div className="section">
-        <h2>AI model</h2>
-        <div className="row" style={{ gap: 28, alignItems: "flex-start" }}>
-          <div className="stat">
-            <b style={{ fontSize: 15 }}>{brain ? (brain.neural ? "Neural (MiniLM)" : "Built-in lexical") : "…"}</b>
-            <span className="small muted">{brain?.loaded ? "Loaded in memory" : "Unloaded — loads when you use an AI tool"}</span>
+      )}
+      {!PHONE && (
+        <div className="section">
+          <h2>AI model</h2>
+          <div className="row" style={{ gap: 28, alignItems: "flex-start" }}>
+            <div className="stat">
+              <b style={{ fontSize: 15 }}>{brain ? (brain.neural ? "Neural (MiniLM)" : "Built-in lexical") : "…"}</b>
+              <span className="small muted">{brain?.loaded ? "Loaded in memory" : "Unloaded — loads when you use an AI tool"}</span>
+            </div>
+            <div className="stat">
+              <b style={{ fontSize: 15 }}>{brain?.indexed ?? "–"}</b>
+              <span className="small muted">notes understood</span>
+            </div>
+            <div className="stat">
+              <b style={{ fontSize: 15 }}>{brain?.pending ?? "–"}</b>
+              <span className="small muted">waiting</span>
+            </div>
           </div>
-          <div className="stat">
-            <b style={{ fontSize: 15 }}>{brain?.indexed ?? "–"}</b>
-            <span className="small muted">notes understood</span>
-          </div>
-          <div className="stat">
-            <b style={{ fontSize: 15 }}>{brain?.pending ?? "–"}</b>
-            <span className="small muted">waiting</span>
-          </div>
+          {brain && !brain.neural && (
+            <p className="small faint" style={{ marginBottom: 0 }}>
+              For smarter matching, install the neural model: <span className="kbd">./run.sh fetch-model</span>
+            </p>
+          )}
         </div>
-        {brain && !brain.neural && (
-          <p className="small faint" style={{ marginBottom: 0 }}>
-            For smarter matching, install the neural model: <span className="kbd">./run.sh fetch-model</span>
-          </p>
-        )}
-      </div>
-      <div className="section">
-        <h2>Updates</h2>
-        <UpdatesSection />
-      </div>
+      )}
+      {!PHONE && (
+        <div className="section">
+          <h2>Updates</h2>
+          <UpdatesSection />
+        </div>
+      )}
       <div className="section">
         <h2>Privacy</h2>
         <ul className="small muted" style={{ margin: 0, paddingLeft: 18, lineHeight: 1.9 }}>
@@ -226,26 +233,28 @@ export function SettingsView({ theme, setTheme, accent, setAccent, matugenPath, 
           <li>Shared and cloud vaults sync end-to-end encrypted: device to device (P2P), and through your own drive, which only ever holds ciphertext. The vault key never goes to the drive.</li>
         </ul>
       </div>
-      <div className="section">
-        <h2>Keyboard shortcuts</h2>
-        <table className="small">
-          <tbody>
-            {[
-              ['Ctrl K', 'Search & commands'],
-              ['Ctrl N', 'New note'],
-              ['Ctrl Shift T', 'Go to tasks'],
-              ['[[', 'Link a note (in the editor)'],
-              ['Ctrl click', 'Follow a link (in the editor)'],
-              ['Ctrl F', 'Find in note'],
-            ].map(([k, d]) => (
-              <tr key={k}>
-                <td style={{ padding: '4px 16px 4px 0' }}><span className="kbd">{k}</span></td>
-                <td className="muted">{d}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {!PHONE && (
+        <div className="section">
+          <h2>Keyboard shortcuts</h2>
+          <table className="small">
+            <tbody>
+              {[
+                ['Ctrl K', 'Search & commands'],
+                ['Ctrl N', 'New note'],
+                ['Ctrl Shift T', 'Go to tasks'],
+                ['[[', 'Link a note (in the editor)'],
+                ['Ctrl click', 'Follow a link (in the editor)'],
+                ['Ctrl F', 'Find in note'],
+              ].map(([k, d]) => (
+                <tr key={k}>
+                  <td style={{ padding: '4px 16px 4px 0' }}><span className="kbd">{k}</span></td>
+                  <td className="muted">{d}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }

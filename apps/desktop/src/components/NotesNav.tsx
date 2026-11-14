@@ -145,6 +145,19 @@ export function NotesNav() {
     })
   }
 
+  // "Move to folder…": pick where a note or folder goes (a folder can't go into itself or below itself).
+  const [moveInto, setMoveInto] = useState<{ note: Note } | { folder: Folder } | null>(null)
+  const moveIntoFolder = (to: Id | null) => {
+    const target = moveInto
+    setMoveInto(null)
+    if (!target) return
+    folderAction(() => ('note' in target ? api.moveNoteToFolder(target.note.id, to).then(app.publishNote) : api.moveFolder(target.folder.id, to)))
+  }
+  const below = (id: Id, root: Id) => {
+    for (let f = folders.find((x) => x.id === id); f; f = f.parentId ? folders.find((x) => x.id === f!.parentId) : undefined) if (f.id === root) return true
+    return false
+  }
+
   const noteAction = async (n: Note, action: NoteAction) => {
     const name = n.title || 'Untitled'
     switch (action) {
@@ -170,6 +183,8 @@ export function NotesNav() {
           })
           openNote(copy.id)
         })
+      case 'toFolder':
+        return setMoveInto({ note: n })
       case 'toVault':
         return setMoveTo({ note: n })
       case 'toTop':
@@ -301,6 +316,7 @@ export function NotesNav() {
             onPinNote={(id) => folderAction(() => api.setPinned(id, true).then(app.publishNote))}
             onNoteAction={noteAction}
             onMoveFolderToVault={(f) => setMoveTo({ folder: f })}
+            onMoveFolderInto={(f) => setMoveInto({ folder: f })}
             onDeleteFolder={async (f) => {
               const parent = f.parentId ? `“${folderPath(folders, f.parentId)}”` : 'the top level'
               if (await confirm.ask(`Delete folder “${f.name}”? Its notes and subfolders move to ${parent} — nothing is deleted.`, 'Delete folder')) {
@@ -334,6 +350,23 @@ export function NotesNav() {
         )}
       </div>
 
+      {moveInto && (
+        <Modal title={'note' in moveInto ? 'Move note to folder' : 'Move folder into'} onClose={() => setMoveInto(null)}>
+          <div className="list">
+            <div className="list-item" onClick={() => moveIntoFolder(null)}>
+              <div className="title">Top level</div>
+            </div>
+            {[...folders]
+              .filter((f) => !('folder' in moveInto) || !below(f.id, moveInto.folder.id))
+              .sort((a, b) => folderPath(folders, a.id).localeCompare(folderPath(folders, b.id)))
+              .map((f) => (
+                <div key={f.id} className="list-item" onClick={() => moveIntoFolder(f.id)}>
+                  <div className="title">{folderPath(folders, f.id)}</div>
+                </div>
+              ))}
+          </div>
+        </Modal>
+      )}
       {moveTo && (
         <Modal title={'note' in moveTo ? 'Move note to vault' : 'Move folder to vault'} onClose={() => setMoveTo(null)}>
           <p className="muted small">
