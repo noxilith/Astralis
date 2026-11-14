@@ -56,6 +56,13 @@ fn client(state: &SharedState) -> Result<ClientConfig> {
     }
 }
 
+/// The app handle, kept for opening links on phones.
+static APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+pub fn remember_app(app: &tauri::AppHandle) {
+    let _ = APP.set(app.clone());
+}
+
 /// Opens a URL in the user's browser.
 fn open_browser(url: &str) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
@@ -65,7 +72,13 @@ fn open_browser(url: &str) -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
     let cmd = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    let cmd: std::io::Result<()> = { let _ = url; Err(std::io::Error::other("not available on phones yet")) };
+    let cmd = {
+        use tauri_plugin_opener::OpenerExt;
+        match APP.get() {
+            Some(app) => app.opener().open_url(url, None::<&str>).map_err(std::io::Error::other),
+            None => Err(std::io::Error::other("the app isn't ready")),
+        }
+    };
     cmd.map(|_| ()).map_err(|e| anyhow::anyhow!("couldn't open the browser: {e}"))
 }
 

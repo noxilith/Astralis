@@ -114,7 +114,9 @@ fn spawn_brain_loop(app: AppHandle, state: SharedState) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin_opener()
         .setup(|app| {
+            cloud::remember_app(app.handle());
             // Leftovers from an update that just finished (the old .exe or .app).
             update::clean_up_after_update();
             // ASTRALIS_PROFILE=name runs a separate profile (own database and device identity),
@@ -170,4 +172,19 @@ fn spawn_p2p(app: AppHandle, state: SharedState, key_path: PathBuf) {
             Err(e) => eprintln!("astralis: P2P failed to start: {e:#}"),
         }
     });
+}
+
+/// The opener plugin exists on phones only.
+trait OpenerPlugin {
+    fn plugin_opener(self) -> Self;
+}
+impl OpenerPlugin for tauri::Builder<tauri::Wry> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    fn plugin_opener(self) -> Self {
+        self.plugin(tauri_plugin_opener::init())
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn plugin_opener(self) -> Self {
+        self
+    }
 }

@@ -36,3 +36,7 @@ base64 = "0.23.1"
 # The updater: checks downloads against the release's SHA-256 sums, unpacks the macOS app.
 sha2 = "0.10"
 zip = { version = "7", default-features = false, features = ["deflate"] }
+
+# Phones open Google's sign-in page through the system (desktop starts the browser itself).
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-opener = "2"
