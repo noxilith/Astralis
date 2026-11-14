@@ -16,3 +16,8 @@ sha2 = "0.10"
 tokio = { version = "1.54.1", features = ["full"] }
 tracing = "0.1.44"
 uuid = { version = "1.29.1", features = ["serde", "v7"] }
+
+# On Android the system's certificate store isn't reachable from Rust without extra Java setup, so
+# secure requests use Mozilla's bundled list of trusted certificate authorities instead.
+[target.'cfg(target_os = "android")'.dependencies]
+webpki-root-certs = "1"

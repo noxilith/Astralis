@@ -24,7 +24,13 @@ export function useGoogle() {
   useEffect(() => {
     listeners.add(setS)
     if (!status) refreshGoogle()
-    return () => void listeners.delete(setS)
+    // Coming back from the browser (or the phone waking up): look again.
+    const back = () => document.visibilityState === 'visible' && void refreshGoogle()
+    document.addEventListener('visibilitychange', back)
+    return () => {
+      document.removeEventListener('visibilitychange', back)
+      listeners.delete(setS)
+    }
   }, [])
   return s
 }
@@ -64,13 +70,16 @@ export function GoogleDriveSettings() {
     }
   }
 
+  const [signInError, setSignInError] = useState('')
   const connect = async () => {
     setBusy(true)
+    setSignInError('')
     try {
       const email = await api.googleConnect()
       await refreshGoogle()
       toast(`Connected Google Drive as ${email}`)
     } catch (e) {
+      setSignInError(e instanceof Error ? e.message : String(e))
       fail(e)
     } finally {
       setBusy(false)
@@ -106,6 +115,7 @@ export function GoogleDriveSettings() {
           </button>
         )}
       </div>
+      {signInError && <p className="small" style={{ color: 'var(--danger)', margin: '6px 0 0', wordBreak: 'break-word' }}>Couldn't connect: {signInError}</p>}
 
       {setup && (
         <div className="drive-setup">

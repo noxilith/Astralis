@@ -188,3 +188,20 @@ pub async fn join_ticket(drive: &GoogleDrive, folder_id: &str, email: &str) -> R
 
 #[cfg(test)]
 mod tests;
+
+/// The HTTP client for Google (sign-in and Drive). On Android it trusts a bundled list of
+/// certificate authorities, because rustls' platform verifier needs Java-side setup that this
+/// app doesn't have (every secure request would fail); elsewhere the system's store is used.
+pub fn http_client() -> reqwest::Client {
+    #[cfg(target_os = "android")]
+    {
+        let certs: Vec<reqwest::Certificate> = webpki_root_certs::TLS_SERVER_ROOT_CERTS
+            .iter()
+            .filter_map(|c| reqwest::Certificate::from_der(c.as_ref()).ok())
+            .collect();
+        if let Ok(client) = reqwest::Client::builder().tls_certs_only(certs).build() {
+            return client;
+        }
+    }
+    reqwest::Client::new()
+}
