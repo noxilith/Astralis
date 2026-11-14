@@ -253,11 +253,10 @@ pub struct MyCloudVault {
     pub folder_id: String,
     pub vault_id: Uuid,
     pub name: String,
-    /// The device that made it (it hands the key over, so it has to be open).
     pub owner_name: String,
     /// Already here (so there is nothing to add).
     pub on_this_device: bool,
-    /// The owner's device has prepared it for other devices.
+    /// Its key is on the Drive (the device that made it has been opened since).
     pub ready: bool,
 }
 
@@ -280,22 +279,20 @@ pub async fn cloud_my_vaults(state: S<'_>) -> Result<Vec<MyCloudVault>> {
         .collect())
 }
 
-/// Adds one of this account's cloud vaults to this device: the device that made it hands over the
-/// key (device to device); the notes then come through the Drive and live from that device.
+/// Adds one of this account's cloud vaults to this device, from the Drive alone (no other device
+/// has to be open): the key is read from the Astralis folder, the notes come with a sync.
 #[tauri::command]
-pub async fn cloud_add_mine(state: S<'_>, folder_id: String) -> Result<String> {
-    let net = state.net.get().cloned().ok_or_else(|| Error::Invalid("peer-to-peer is still starting; try again in a moment".into()))?;
+pub async fn cloud_add_mine(app: AppHandle, state: S<'_>, folder_id: String) -> Result<String> {
     let d = drive(&state).await?;
-    let ticket = astralis_cloud::own_join_ticket(&d, &folder_id).await.map_err(err)?;
-    if ticket.owner == net.id() {
-        return Err(Error::Invalid("this device made that vault, so it is already here".into()));
+    let (vault, name) = astralis_cloud::add_my_cloud_vault(&d, &state.store, &folder_id).await.map_err(err)?;
+    match astralis_cloud::sync_vault(&d, &state.store, vault).await {
+        Ok(r) => {
+            let _ = app.emit("p2p", serde_json::json!({ "type": "synced", "peer": "drive", "notes": r.notes }));
+        }
+        // The vault is added; the notes arrive with the next sync.
+        Err(e) => tracing_warn(&format!("first sync of an added cloud vault failed: {e:#}")),
     }
-    let request = astralis_net::JoinRequest { vault: ticket.vault, email: ticket.email.clone(), secret: ticket.secret.clone() };
-    let who = if ticket.owner_name.is_empty() { "the device that made it".to_string() } else { ticket.owner_name.clone() };
-    net.join_vault(&ticket.owner, request)
-        .await
-        .map_err(|e| Error::Invalid(format!("couldn't reach {who}: {e:#}. Open Astralis on {who} (it hands the vault's key over) and try again.")))?;
-    Ok(ticket.name)
+    Ok(name)
 }
 
 /// Opens a web page in the user's browser (setup links). Only https.
@@ -321,9 +318,9 @@ async fn sync_all(app: &AppHandle, state: &SharedState) -> Result<()> {
     }
     let d = drive(state).await?;
     for v in vaults {
-        // So this account's other devices can add the vault (it only does anything once).
+        // So this account's other devices can add the vault from the Drive (once per vault).
         if v.owned {
-            let _ = astralis_cloud::ensure_own_secret(&d, &state.store, v.vault_id).await;
+            let _ = astralis_cloud::ensure_key_on_drive(&d, &state.store, v.vault_id).await;
         }
         match astralis_cloud::sync_vault(&d, &state.store, v.vault_id).await {
             Ok(r) if r.applied > 0 => {

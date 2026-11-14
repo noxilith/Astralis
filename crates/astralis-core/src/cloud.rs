@@ -38,9 +38,6 @@ pub(crate) const CLOUD_MIGRATION: &str = "
 
 /// Providers a cloud vault can live on.
 pub const GOOGLE_DRIVE: &str = "google-drive";
-/// The reserved "invite" that lets the owner's own other devices (same Google account) add a cloud
-/// vault: not an email, never shown as a person, and usable by any number of devices.
-pub const OWN_DEVICES: &str = "my-other-devices.invalid";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,20 +157,10 @@ impl Store {
         Ok(())
     }
 
-    /// Whether an invite (by email, or the reserved [`OWN_DEVICES`]) exists for the vault.
-    pub fn has_cloud_invite(&self, vault: Uuid, email: &str) -> Result<bool> {
-        let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM cloud_invites WHERE vault_id = ?1 AND email = ?2",
-            params![vault.as_bytes(), normalize_email(email)],
-            |r| r.get(0),
-        )?;
-        Ok(n > 0)
-    }
-
     pub fn cloud_invites(&self, vault: Uuid) -> Result<Vec<CloudInvite>> {
         let mut stmt =
-            self.conn.prepare("SELECT email, accepted_by FROM cloud_invites WHERE vault_id = ?1 AND email != ?2 ORDER BY email")?;
-        let rows = stmt.query_map(params![vault.as_bytes(), OWN_DEVICES], |r| Ok(CloudInvite { email: r.get(0)?, accepted_by: r.get(1)? }))?;
+            self.conn.prepare("SELECT email, accepted_by FROM cloud_invites WHERE vault_id = ?1 ORDER BY email")?;
+        let rows = stmt.query_map([vault.as_bytes()], |r| Ok(CloudInvite { email: r.get(0)?, accepted_by: r.get(1)? }))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -190,14 +177,8 @@ impl Store {
             .optional()?;
         let Some((expected, accepted_by)) = row else { return Ok(false) };
         let same = expected.len() == secret.len() && expected.bytes().zip(secret.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0;
-        let own = normalize_email(email) == OWN_DEVICES;
-        if !same || (!own && accepted_by.as_deref().is_some_and(|d| d != device)) {
+        if !same || accepted_by.as_deref().is_some_and(|d| d != device) {
             return Ok(false);
-        }
-        if own {
-            // Any of the owner's devices may use it, any number of times: no one device owns it.
-            self.share_vault(vault, device)?;
-            return Ok(true);
         }
         self.conn.execute(
             "UPDATE cloud_invites SET accepted_by = ?3 WHERE vault_id = ?1 AND email = ?2",

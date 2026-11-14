@@ -20,7 +20,7 @@ pub use reqwest;
 use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow, bail};
-use astralis_core::cloud::{CloudVault, GOOGLE_DRIVE, OWN_DEVICES};
+use astralis_core::cloud::{CloudVault, GOOGLE_DRIVE};
 use astralis_core::vault::Vault;
 use base64::Engine;
 use sha2::{Digest, Sha256};
@@ -101,8 +101,8 @@ pub async fn make_cloud(drive: &GoogleDrive, store: &StoreHandle, vault: Uuid, n
             uploaded_vv: Default::default(),
         })
         .map_err(|e| anyhow!("{e}"))?;
-    // So the owner's other devices can add this vault later (a failure here only delays that).
-    let _ = ensure_own_secret(drive, store, vault).await;
+    // So this account's other devices can add this vault later (a failure here only delays that).
+    let _ = ensure_key_on_drive(drive, store, vault).await;
     Ok(())
 }
 
@@ -152,38 +152,36 @@ fn owned_cloud_vault(store: &StoreHandle, vault: Uuid) -> Result<CloudVault> {
     }
 }
 
-/// The property on the (never shared) top-level Astralis folder holding the secret that lets the
-/// owner's own other devices add `vault`. Not on the vault's folder: that one is shared with
-/// whoever is invited, and this secret is only for the owner's own devices.
-fn own_prop(vault: Uuid) -> String {
-    format!("own_{}", &vault.simple().to_string()[..16])
+/// The property on the top-level Astralis folder (which is never shared with anyone) holding the
+/// key of `vault`, so this account's other devices can add it from the Drive alone. It isn't on
+/// the vault's own folder: that one is shared with whoever is invited.
+fn key_prop(vault: Uuid) -> String {
+    format!("key_{}", &vault.simple().to_string()[..16])
 }
 
-/// Makes sure this (owning) device accepts the owner's other devices for `vault`: a secret kept on
-/// the top-level Astralis folder, remembered here as the reserved [`OWN_DEVICES`] invite.
-pub async fn ensure_own_secret(drive: &GoogleDrive, store: &StoreHandle, vault: Uuid) -> Result<()> {
-    owned_cloud_vault(store, vault)?;
-    let already = store.lock().unwrap().has_cloud_invite(vault, OWN_DEVICES).map_err(|e| anyhow!("{e}"))?;
-    if already {
+/// Puts the vault's key on the Drive for this account's other devices (once per device and vault).
+/// The files in the folder stay sealed with it; a stranger with only the files can't read them.
+pub async fn ensure_key_on_drive(drive: &GoogleDrive, store: &StoreHandle, vault: Uuid) -> Result<()> {
+    let flag = format!("cloud.keyput.{vault}");
+    let cv = owned_cloud_vault(store, vault)?;
+    if store.lock().unwrap().get_setting(&flag).map_err(|e| anyhow!("{e}"))?.is_some_and(|v| v == "1") {
         return Ok(());
     }
-    let secret = secret()?;
     let root = drive.root_folder().await?;
-    drive.set_props(&root, &BTreeMap::from([(own_prop(vault), Some(secret.clone()))])).await?;
-    store.lock().unwrap().add_cloud_invite(vault, OWN_DEVICES, &secret).map_err(|e| anyhow!("{e}"))?;
+    let key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&cv.sync_key);
+    drive.set_props(&root, &BTreeMap::from([(key_prop(vault), Some(key))])).await?;
+    store.lock().unwrap().set_setting(&flag, "1").map_err(|e| anyhow!("{e}"))?;
     Ok(())
 }
 
 /// A cloud vault in the user's own Drive (what "Add existing cloud vault" lists).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MyVault {
-    /// The owner's device has prepared it for adding to another device.
+    /// Its key is on the Drive (the device that made it has been opened since this existed).
     pub ready: bool,
     pub folder_id: String,
     pub vault: Uuid,
     pub name: String,
-    /// The device that made it (it hands over the key).
-    pub owner: String,
     pub owner_name: String,
 }
 
@@ -196,38 +194,54 @@ pub async fn my_cloud_vaults(drive: &GoogleDrive) -> Result<Vec<MyVault>> {
         if f.props.get(PROP_KIND).map(String::as_str) != Some("vault") {
             continue;
         }
-        let (Some(vault), Some(owner)) = (f.props.get(PROP_VAULT).and_then(|v| v.parse().ok()), f.props.get(PROP_OWNER).cloned()) else {
-            continue;
-        };
-        out.push(MyVault { ready: root_props.contains_key(&own_prop(vault)), folder_id: f.id, vault, name: f.name, owner, owner_name: f.props.get(PROP_OWNER_NAME).cloned().unwrap_or_default() });
+        let Some(vault) = f.props.get(PROP_VAULT).and_then(|v| v.parse().ok()) else { continue };
+        out.push(MyVault {
+            ready: root_props.contains_key(&key_prop(vault)),
+            folder_id: f.id,
+            vault,
+            name: f.name,
+            owner_name: f.props.get(PROP_OWNER_NAME).cloned().unwrap_or_default(),
+        });
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(out)
 }
 
-/// What this device needs to add one of its own account's cloud vaults: read from Drive, no
-/// picking and no invite (the same Google account is the proof).
-pub async fn own_join_ticket(drive: &GoogleDrive, folder_id: &str) -> Result<JoinTicket> {
+/// Adds one of this account's cloud vaults to this device, from the Drive alone: the key is read
+/// from the (never shared) Astralis folder; the notes come with the next sync. Returns the vault
+/// and its name.
+pub async fn add_my_cloud_vault(drive: &GoogleDrive, store: &StoreHandle, folder_id: &str) -> Result<(Uuid, String)> {
     let f = drive.folder(folder_id).await?;
     if f.props.get(PROP_KIND).map(String::as_str) != Some("vault") {
         bail!("“{}” isn't an Astralis vault folder", f.name);
     }
     let vault: Uuid = f.props.get(PROP_VAULT).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow!("vault folder is missing its id"))?;
-    let owner = f.props.get(PROP_OWNER).cloned().ok_or_else(|| anyhow!("vault folder is missing its owner"))?;
+    if store.lock().unwrap().cloud_vault(vault).map_err(|e| anyhow!("{e}"))?.is_some() {
+        bail!("“{}” is already on this device", f.name);
+    }
     let root = drive.root_folder().await?;
-    let secret = drive.folder(&root).await?.props.get(&own_prop(vault)).cloned().ok_or_else(|| {
-        anyhow!("“{}” isn't ready to be added to another device yet: open Astralis on the device that made it (it prepares this when it syncs), then try again", f.name)
+    let key = drive.folder(&root).await?.props.get(&key_prop(vault)).cloned().ok_or_else(|| {
+        anyhow!("“{}” isn't ready to be added to another device yet: open Astralis once on the device that made it (updated), then try again", f.name)
     })?;
-    Ok(JoinTicket {
-        vault,
-        folder_id: f.id,
-        name: f.name,
-        owner,
-        owner_name: f.props.get(PROP_OWNER_NAME).cloned().unwrap_or_default(),
-        email: OWN_DEVICES.to_string(),
-        secret,
-    })
+    let key = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(key.trim()).map_err(|_| anyhow!("the vault's key on the Drive is damaged"))?;
+    if key.len() != 32 {
+        bail!("the vault's key on the Drive is damaged");
+    }
+    store
+        .lock()
+        .unwrap()
+        .set_cloud_vault(&CloudVault {
+            vault_id: vault,
+            provider: GOOGLE_DRIVE.into(),
+            folder_id: f.id,
+            sync_key: key,
+            owned: true,
+            uploaded_vv: Default::default(),
+        })
+        .map_err(|e| anyhow!("{e}"))?;
+    Ok((vault, f.name))
 }
+
 
 /// What someone invited needs to join: read from the folder they picked.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -290,7 +290,7 @@ export const api = {
   cloudJoin: () => call<string>('cloud_join'),
   /** The cloud vaults in this Google account's Drive. */
   cloudMyVaults: () => call<MyCloudVault[]>('cloud_my_vaults'),
-  /** Adds one of them to this device (the device that made it hands the key over); returns its name. */
+  /** Adds one of them to this device, from the Drive alone; returns its name. */
   cloudAddMine: (folderId: string) => call<string>('cloud_add_mine', { folderId }),
   cloudSyncNow: () => call<void>('cloud_sync_now'),
   openUrl: (url: string) => call<void>('open_url', { url }),

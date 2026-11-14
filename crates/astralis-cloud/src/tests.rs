@@ -207,3 +207,30 @@ fn invite_properties_are_per_email_and_case_insensitive() {
     // Drive limits a property's key + value to 124 bytes.
     assert!(invite_prop("someone@example.com").len() + secret().unwrap().len() < 124);
 }
+
+/// A new device that has only the key and the folder (read from the user's own Drive) gets the
+/// vault itself, with its name, and its notes, from the Drive alone.
+#[tokio::test]
+async fn a_device_with_only_the_key_and_folder_gets_the_whole_vault_from_the_drive() {
+    let a = handle();
+    let b = handle();
+    let v = a.lock().unwrap().create_vault("Family", None).unwrap();
+    let key = astralis_core::vault::random::<32>().unwrap().to_vec();
+    a.lock()
+        .unwrap()
+        .set_cloud_vault(&CloudVault { vault_id: v.id, provider: GOOGLE_DRIVE.into(), folder_id: "folder".into(), sync_key: key.clone(), owned: true, uploaded_vv: Default::default() })
+        .unwrap();
+    a.lock().unwrap().create_note(NewNote { title: "Recipes".into(), body: "soup".into(), vault_id: Some(v.id), ..Default::default() }).unwrap();
+    let drive = MemDrive::default();
+    sync_vault(&drive, &a, v.id).await.unwrap();
+
+    assert!(b.lock().unwrap().get_vault(v.id).is_err(), "B knows nothing yet");
+    b.lock()
+        .unwrap()
+        .set_cloud_vault(&CloudVault { vault_id: v.id, provider: GOOGLE_DRIVE.into(), folder_id: "folder".into(), sync_key: key, owned: true, uploaded_vv: Default::default() })
+        .unwrap();
+    sync_vault(&drive, &b, v.id).await.unwrap();
+    let got = b.lock().unwrap().get_vault(v.id).unwrap();
+    assert_eq!(got.name, "Family");
+    assert_eq!(titles(&b, v.id), vec!["Recipes"]);
+}
