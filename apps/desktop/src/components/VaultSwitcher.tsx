@@ -6,6 +6,7 @@ import { Modal, Spinner, useConfirm, usePrompt } from './ui'
 import { DuplicatesModal, OrganizeModal } from './VaultTools'
 import { useCollab } from '../lib/collab'
 import { CloudInvitesModal, useGoogle } from './GoogleDrive'
+import { AddCloudVaultModal } from './AddCloudVault'
 
 const CLOUD_PROVIDERS = ['Google Drive', 'Microsoft OneDrive', 'Box', 'Dropbox', 'pCloud']
 
@@ -58,6 +59,7 @@ export function VaultSwitcher() {
   const [form, setForm] = useState<{ encrypted: boolean; name: string; password: string; confirm: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [cloudOpen, setCloudOpen] = useState(false)
+  const [addOpen, setAddOpen] = useState(false)
   const [tool, setTool] = useState<'organize' | 'duplicates' | null>(null)
   const [sharing, setSharing] = useState(false)
   const [people, setPeople] = useState(false)
@@ -213,6 +215,9 @@ export function VaultSwitcher() {
             </button>
             <button onClick={() => (setOpen(false), setCloudOpen(true))}>
               <Cloud size={14} /> New cloud vault…
+            </button>
+            <button onClick={() => (setOpen(false), setAddOpen(true))}>
+              <Cloud size={14} /> Add existing cloud vault…
             </button>
             {google?.email && (
               <button onClick={join}>
@@ -417,6 +422,16 @@ export function VaultSwitcher() {
             </div>
           )}
         </Modal>
+      )}
+      {addOpen && (
+        <AddCloudVaultModal
+          onClose={() => setAddOpen(false)}
+          onAdded={async (name) => {
+            setAddOpen(false)
+            await afterChange()
+            toast(`Added “${name}”`)
+          }}
+        />
       )}
       {prompt.element}
       {confirm.element}

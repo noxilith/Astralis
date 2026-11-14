@@ -246,6 +246,58 @@ pub async fn cloud_join(state: S<'_>) -> Result<String> {
     Ok(ticket.name)
 }
 
+/// A cloud vault in the user's Drive, for "Add existing cloud vault".
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MyCloudVault {
+    pub folder_id: String,
+    pub vault_id: Uuid,
+    pub name: String,
+    /// The device that made it (it hands the key over, so it has to be open).
+    pub owner_name: String,
+    /// Already here (so there is nothing to add).
+    pub on_this_device: bool,
+    /// The owner's device has prepared it for other devices.
+    pub ready: bool,
+}
+
+/// The cloud vaults in this Google account's Drive (made by Astralis on any of its devices).
+#[tauri::command]
+pub async fn cloud_my_vaults(state: S<'_>) -> Result<Vec<MyCloudVault>> {
+    let d = drive(&state).await?;
+    let list = astralis_cloud::my_cloud_vaults(&d).await.map_err(err)?;
+    let s = state.store.lock().unwrap();
+    Ok(list
+        .into_iter()
+        .map(|v| MyCloudVault {
+            on_this_device: s.get_vault(v.vault).is_ok(),
+            folder_id: v.folder_id,
+            vault_id: v.vault,
+            name: v.name,
+            owner_name: v.owner_name,
+            ready: v.ready,
+        })
+        .collect())
+}
+
+/// Adds one of this account's cloud vaults to this device: the device that made it hands over the
+/// key (device to device); the notes then come through the Drive and live from that device.
+#[tauri::command]
+pub async fn cloud_add_mine(state: S<'_>, folder_id: String) -> Result<String> {
+    let net = state.net.get().cloned().ok_or_else(|| Error::Invalid("peer-to-peer is still starting; try again in a moment".into()))?;
+    let d = drive(&state).await?;
+    let ticket = astralis_cloud::own_join_ticket(&d, &folder_id).await.map_err(err)?;
+    if ticket.owner == net.id() {
+        return Err(Error::Invalid("this device made that vault, so it is already here".into()));
+    }
+    let request = astralis_net::JoinRequest { vault: ticket.vault, email: ticket.email.clone(), secret: ticket.secret.clone() };
+    let who = if ticket.owner_name.is_empty() { "the device that made it".to_string() } else { ticket.owner_name.clone() };
+    net.join_vault(&ticket.owner, request)
+        .await
+        .map_err(|e| Error::Invalid(format!("couldn't reach {who}: {e:#}. Open Astralis on {who} (it hands the vault's key over) and try again.")))?;
+    Ok(ticket.name)
+}
+
 /// Opens a web page in the user's browser (setup links). Only https.
 #[tauri::command]
 pub fn open_url(url: String) -> Result<()> {
@@ -269,6 +321,10 @@ async fn sync_all(app: &AppHandle, state: &SharedState) -> Result<()> {
     }
     let d = drive(state).await?;
     for v in vaults {
+        // So this account's other devices can add the vault (it only does anything once).
+        if v.owned {
+            let _ = astralis_cloud::ensure_own_secret(&d, &state.store, v.vault_id).await;
+        }
         match astralis_cloud::sync_vault(&d, &state.store, v.vault_id).await {
             Ok(r) if r.applied > 0 => {
                 // Same event as P2P sync, so open views refresh the same way.

@@ -347,6 +347,16 @@ const handlers: Record<string, (a: Args) => unknown> = {
   },
   cloud_uninvite: ({ vaultId, email }) => void invites.set(vaultId, (invites.get(vaultId) ?? []).filter((i: { email: string }) => i.email !== email)),
   cloud_join: () => 'Shared vault',
+  cloud_my_vaults: () => [
+    { folderId: 'f1', vaultId: 'v-family', name: 'Family', ownerName: 'Desktop', onThisDevice: false, ready: true },
+    { folderId: 'f2', vaultId: 'v-work', name: 'Work notes', ownerName: 'Laptop', onThisDevice: false, ready: false },
+    { folderId: 'f3', vaultId: vaults[0]?.id ?? 'x', name: vaults[0]?.name ?? 'Personal', ownerName: 'Desktop', onThisDevice: true, ready: true },
+  ],
+  cloud_add_mine: ({ folderId }) => {
+    const name = folderId === 'f1' ? 'Family' : 'Vault'
+    vaults.push({ id: id(), name, createdAt: now(), encrypted: false, unlocked: true, noteCount: 0, owner: null, sharedWith: [], cloud: 'google-drive' })
+    return name
+  },
   cloud_sync_now: () => undefined,
   // Ask Astralis (pretend: canned replies).
   assistant_status: () => ({ ready: assistantReady, downloading: false, loaded: assistantReady, actions: [

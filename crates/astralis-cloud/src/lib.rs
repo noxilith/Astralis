@@ -20,7 +20,7 @@ pub use reqwest;
 use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow, bail};
-use astralis_core::cloud::{CloudVault, GOOGLE_DRIVE};
+use astralis_core::cloud::{CloudVault, GOOGLE_DRIVE, OWN_DEVICES};
 use astralis_core::vault::Vault;
 use base64::Engine;
 use sha2::{Digest, Sha256};
@@ -100,7 +100,10 @@ pub async fn make_cloud(drive: &GoogleDrive, store: &StoreHandle, vault: Uuid, n
             owned: true,
             uploaded_vv: Default::default(),
         })
-        .map_err(|e| anyhow!("{e}"))
+        .map_err(|e| anyhow!("{e}"))?;
+    // So the owner's other devices can add this vault later (a failure here only delays that).
+    let _ = ensure_own_secret(drive, store, vault).await;
+    Ok(())
 }
 
 /// Invites someone by email: shares the folder with them (Google emails them) and leaves a
@@ -147,6 +150,83 @@ fn owned_cloud_vault(store: &StoreHandle, vault: Uuid) -> Result<CloudVault> {
         Some(_) => bail!("only the vault's owner can invite people"),
         None => bail!("this isn't a cloud vault"),
     }
+}
+
+/// The property on the (never shared) top-level Astralis folder holding the secret that lets the
+/// owner's own other devices add `vault`. Not on the vault's folder: that one is shared with
+/// whoever is invited, and this secret is only for the owner's own devices.
+fn own_prop(vault: Uuid) -> String {
+    format!("own_{}", &vault.simple().to_string()[..16])
+}
+
+/// Makes sure this (owning) device accepts the owner's other devices for `vault`: a secret kept on
+/// the top-level Astralis folder, remembered here as the reserved [`OWN_DEVICES`] invite.
+pub async fn ensure_own_secret(drive: &GoogleDrive, store: &StoreHandle, vault: Uuid) -> Result<()> {
+    owned_cloud_vault(store, vault)?;
+    let already = store.lock().unwrap().has_cloud_invite(vault, OWN_DEVICES).map_err(|e| anyhow!("{e}"))?;
+    if already {
+        return Ok(());
+    }
+    let secret = secret()?;
+    let root = drive.root_folder().await?;
+    drive.set_props(&root, &BTreeMap::from([(own_prop(vault), Some(secret.clone()))])).await?;
+    store.lock().unwrap().add_cloud_invite(vault, OWN_DEVICES, &secret).map_err(|e| anyhow!("{e}"))?;
+    Ok(())
+}
+
+/// A cloud vault in the user's own Drive (what "Add existing cloud vault" lists).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MyVault {
+    /// The owner's device has prepared it for adding to another device.
+    pub ready: bool,
+    pub folder_id: String,
+    pub vault: Uuid,
+    pub name: String,
+    /// The device that made it (it hands over the key).
+    pub owner: String,
+    pub owner_name: String,
+}
+
+/// The vaults in `Astralis/` on this Google account's Drive, made by this app on any device.
+pub async fn my_cloud_vaults(drive: &GoogleDrive) -> Result<Vec<MyVault>> {
+    let root = drive.root_folder().await?;
+    let root_props = drive.folder(&root).await?.props;
+    let mut out = Vec::new();
+    for f in drive.subfolders(&root).await? {
+        if f.props.get(PROP_KIND).map(String::as_str) != Some("vault") {
+            continue;
+        }
+        let (Some(vault), Some(owner)) = (f.props.get(PROP_VAULT).and_then(|v| v.parse().ok()), f.props.get(PROP_OWNER).cloned()) else {
+            continue;
+        };
+        out.push(MyVault { ready: root_props.contains_key(&own_prop(vault)), folder_id: f.id, vault, name: f.name, owner, owner_name: f.props.get(PROP_OWNER_NAME).cloned().unwrap_or_default() });
+    }
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(out)
+}
+
+/// What this device needs to add one of its own account's cloud vaults: read from Drive, no
+/// picking and no invite (the same Google account is the proof).
+pub async fn own_join_ticket(drive: &GoogleDrive, folder_id: &str) -> Result<JoinTicket> {
+    let f = drive.folder(folder_id).await?;
+    if f.props.get(PROP_KIND).map(String::as_str) != Some("vault") {
+        bail!("“{}” isn't an Astralis vault folder", f.name);
+    }
+    let vault: Uuid = f.props.get(PROP_VAULT).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow!("vault folder is missing its id"))?;
+    let owner = f.props.get(PROP_OWNER).cloned().ok_or_else(|| anyhow!("vault folder is missing its owner"))?;
+    let root = drive.root_folder().await?;
+    let secret = drive.folder(&root).await?.props.get(&own_prop(vault)).cloned().ok_or_else(|| {
+        anyhow!("“{}” isn't ready to be added to another device yet: open Astralis on the device that made it (it prepares this when it syncs), then try again", f.name)
+    })?;
+    Ok(JoinTicket {
+        vault,
+        folder_id: f.id,
+        name: f.name,
+        owner,
+        owner_name: f.props.get(PROP_OWNER_NAME).cloned().unwrap_or_default(),
+        email: OWN_DEVICES.to_string(),
+        secret,
+    })
 }
 
 /// What someone invited needs to join: read from the folder they picked.

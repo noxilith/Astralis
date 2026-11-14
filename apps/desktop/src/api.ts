@@ -165,6 +165,8 @@ export interface AssistantAction { id: string; label: string; hint: string; grou
 export interface AssistantStatus { ready: boolean; downloading: boolean; loaded: boolean; actions: AssistantAction[] }
 export interface GoogleStatus { configured: boolean; builtin: boolean; clientId: string | null; email: string | null }
 export interface CloudInvite { email: string; acceptedBy: string | null }
+/** A cloud vault in the user's own Drive (made on any of their devices). */
+export interface MyCloudVault { folderId: string; vaultId: Id; name: string; ownerName: string; onThisDevice: boolean; ready: boolean }
 
 export interface GrammarFix { kind: 'replace' | 'insert' | 'remove'; text: string }
 export interface GrammarIssue { start: number; end: number; message: string; kind: string; fixes: GrammarFix[] }
@@ -286,6 +288,10 @@ export const api = {
   cloudUninvite: (vaultId: Id, email: string) => call<void>('cloud_uninvite', { vaultId, email }),
   /** Opens the Google Picker to choose a shared vault folder; returns the vault's name. */
   cloudJoin: () => call<string>('cloud_join'),
+  /** The cloud vaults in this Google account's Drive. */
+  cloudMyVaults: () => call<MyCloudVault[]>('cloud_my_vaults'),
+  /** Adds one of them to this device (the device that made it hands the key over); returns its name. */
+  cloudAddMine: (folderId: string) => call<string>('cloud_add_mine', { folderId }),
   cloudSyncNow: () => call<void>('cloud_sync_now'),
   openUrl: (url: string) => call<void>('open_url', { url }),
   /** What AI agents (through the Brain's MCP server) may do with the user's notes. */

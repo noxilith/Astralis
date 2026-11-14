@@ -301,3 +301,44 @@ async fn invited_by_email_joins_a_cloud_vault_without_pairing() {
     assert!(b.store.lock().unwrap().cloud_vault(vault).unwrap().is_none());
     assert!(a.store.lock().unwrap().get_note(n.id).is_ok());
 }
+
+/// The owner's other devices (same Google account) add a cloud vault with the reserved invite:
+/// two devices can both do it, they get the vault, its drive folder and key, and nothing else.
+#[tokio::test]
+async fn own_other_devices_add_a_cloud_vault_with_the_reserved_invite() {
+    use astralis_core::cloud::OWN_DEVICES;
+    let a = device("Desktop").await;
+    let phone = device("Phone").await;
+    let tablet = device("Tablet").await;
+    let (vault, n) = {
+        let mut s = a.store.lock().unwrap();
+        let v = s.create_vault("Mine", None).unwrap();
+        s.set_cloud_vault(&astralis_core::cloud::CloudVault {
+            vault_id: v.id,
+            provider: "google-drive".into(),
+            folder_id: "folder-9".into(),
+            sync_key: vec![9; 32],
+            owned: true,
+            uploaded_vv: Default::default(),
+        })
+        .unwrap();
+        s.add_cloud_invite(v.id, OWN_DEVICES, "own-secret").unwrap();
+        let n = s.create_note(NewNote { title: "Plans".into(), body: "x".into(), vault_id: Some(v.id), ..Default::default() }).unwrap();
+        (v.id, n)
+    };
+    let private = a.store.lock().unwrap().create_note(NewNote { title: "Private".into(), ..Default::default() }).unwrap();
+
+    let bad = JoinRequest { vault, email: OWN_DEVICES.into(), secret: "nope".into() };
+    assert!(phone.net.join_vault_at(&a.net.id(), bad, Some(a.net.addr())).await.is_err());
+
+    let ok = JoinRequest { vault, email: OWN_DEVICES.into(), secret: "own-secret".into() };
+    phone.net.join_vault_at(&a.net.id(), ok.clone(), Some(a.net.addr())).await.unwrap();
+    tablet.net.join_vault_at(&a.net.id(), ok, Some(a.net.addr())).await.unwrap();
+    for d in [&phone, &tablet] {
+        eventually("vault on the device", || d.store.lock().unwrap().get_note(n.id).is_ok()).await;
+        eventually("drive info on the device", || d.store.lock().unwrap().cloud_vault(vault).unwrap().is_some_and(|c| c.folder_id == "folder-9" && c.sync_key == vec![9; 32])).await;
+        assert!(d.store.lock().unwrap().get_note(private.id).is_err());
+    }
+    // Not listed as a person.
+    assert!(a.store.lock().unwrap().cloud_invites(vault).unwrap().is_empty());
+}

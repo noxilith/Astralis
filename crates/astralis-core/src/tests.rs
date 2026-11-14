@@ -2209,3 +2209,26 @@ fn a_hook_doesnt_repeat_memories_it_already_gave_this_session() {
     shown.extend(handles);
     assert!(s.brain_hook_prompt_new(p, "another python script for editing files please", &shown).unwrap().is_none(), "already given");
 }
+
+/// The owner's own other devices add a cloud vault with the reserved invite: any number of devices,
+/// repeatedly, and it never shows as a person in the vault's list.
+#[test]
+fn own_devices_invite_works_for_any_device_and_stays_hidden() {
+    use crate::cloud::OWN_DEVICES;
+    let mut s = store();
+    let vault = s.create_vault("Mine", None).unwrap().id;
+    s.add_cloud_invite(vault, "friend@example.com", "friend-secret").unwrap();
+    s.add_cloud_invite(vault, OWN_DEVICES, "own-secret").unwrap();
+    assert!(s.has_cloud_invite(vault, OWN_DEVICES).unwrap());
+    // Only the friend is listed.
+    let listed: Vec<_> = s.cloud_invites(vault).unwrap().into_iter().map(|i| i.email).collect();
+    assert_eq!(listed, vec!["friend@example.com".to_string()]);
+    // A wrong secret is refused; the right one works for several devices, more than once.
+    assert!(!s.redeem_cloud_invite(vault, OWN_DEVICES, "nope", "phone").unwrap());
+    assert!(s.redeem_cloud_invite(vault, OWN_DEVICES, "own-secret", "phone").unwrap());
+    assert!(s.redeem_cloud_invite(vault, OWN_DEVICES, "own-secret", "tablet").unwrap());
+    assert!(s.redeem_cloud_invite(vault, OWN_DEVICES, "own-secret", "phone").unwrap());
+    // A person's invite is still one device only.
+    assert!(s.redeem_cloud_invite(vault, "friend@example.com", "friend-secret", "laptop").unwrap());
+    assert!(!s.redeem_cloud_invite(vault, "friend@example.com", "friend-secret", "someone-else").unwrap());
+}

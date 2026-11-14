@@ -148,6 +148,30 @@ impl GoogleDrive {
         Ok(FolderInfo { id: f.id, name: f.name, props: f.app_properties })
     }
 
+    /// The folders directly inside `parent` that this app can see, with their private properties.
+    pub async fn subfolders(&self, parent: &str) -> Result<Vec<FolderInfo>> {
+        let q = format!("'{}' in parents and mimeType = '{FOLDER}' and trashed = false", quote(parent));
+        let mut out = Vec::new();
+        let mut page: Option<String> = None;
+        loop {
+            let mut req = self
+                .http
+                .get(format!("{API}/files"))
+                .query(&[("q", q.as_str()), ("fields", "nextPageToken,files(id,name,appProperties)"), ("pageSize", "100")])
+                .bearer_auth(&self.token);
+            if let Some(p) = &page {
+                req = req.query(&[("pageToken", p.as_str())]);
+            }
+            let list: ListJson = Self::check(req.send().await?).await?.json().await?;
+            out.extend(list.files.into_iter().map(|f| FolderInfo { id: f.id, name: f.name, props: f.app_properties }));
+            match list.next_page_token {
+                Some(t) => page = Some(t),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
     /// Sets (or with `None`, removes) private app properties on a file or folder.
     pub async fn set_props(&self, id: &str, props: &BTreeMap<String, Option<String>>) -> Result<()> {
         let resp = self
