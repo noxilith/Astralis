@@ -64,6 +64,8 @@ fn open_browser(url: &str) -> anyhow::Result<()> {
     let cmd = std::process::Command::new("open").arg(url).spawn();
     #[cfg(target_os = "windows")]
     let cmd = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let cmd: std::io::Result<()> = { let _ = url; Err(std::io::Error::other("not available on phones yet")) };
     cmd.map(|_| ()).map_err(|e| anyhow::anyhow!("couldn't open the browser: {e}"))
 }
 
