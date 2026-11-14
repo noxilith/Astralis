@@ -1,6 +1,6 @@
 [package]
 name = "astralis-desktop"
-version = "1.0.3"
+version = "1.0.4"
 license = "GPL-3.0-or-later"
 description = "Astralis — notes & productivity"
 edition = "2024"
@@ -14,12 +14,15 @@ serde_json = "1"
 tauri-build = { version = "2", features = [] }
 
 [features]
+# The in-app models (embeddings and Ask Astralis). Phones build with --no-default-features.
+default = ["ml"]
+ml = ["astralis-core/ml"]
 # Ask Astralis on the graphics chip; see crates/astralis-core/Cargo.toml.
-gpu-vulkan = ["astralis-core/gpu-vulkan"]
-gpu-metal = ["astralis-core/gpu-metal"]
+gpu-vulkan = ["ml", "astralis-core/gpu-vulkan"]
+gpu-metal = ["ml", "astralis-core/gpu-metal"]
 
 [dependencies]
-astralis-core = { path = "../../../crates/astralis-core" }
+astralis-core = { path = "../../../crates/astralis-core", default-features = false }
 astralis-net = { path = "../../../crates/astralis-net" }
 astralis-cloud = { path = "../../../crates/astralis-cloud" }
 tokio = { version = "1", features = ["sync", "time"] }

@@ -34,3 +34,7 @@ ml = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokeni
 # Vulkan drivers). Vulkan for Linux and Windows, Metal for macOS.
 gpu-vulkan = ["ml", "llama-cpp-2/vulkan"]
 gpu-metal = ["ml", "llama-cpp-2/metal"]
+
+[[example]]
+name = "ask_assistant"
+required-features = ["ml"]

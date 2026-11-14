@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification'
 import { api, type Reminder } from './api'
@@ -37,6 +37,10 @@ function Shell() {
     return () => window.removeEventListener("astralis-error", onError)
   }, [fail])
   const { theme, setTheme, accent, setAccent, base: themeBase, matugen } = useAppearance()
+  // The saved "fill the whole width" choice for notes.
+  useEffect(() => {
+    void loadNoteWidth().then(applyNoteWidth)
+  }, [])
 
   useEffect(() => {
     isPermissionGranted()

@@ -1,3 +1,8 @@
+// Ask Astralis needs the local model (the "ml" feature); phones build without it.
+#[cfg(feature = "ml")]
+mod assistant_cmds;
+#[cfg(not(feature = "ml"))]
+#[path = "assistant_stub.rs"]
 mod assistant_cmds;
 mod brain_cmds;
 mod cloud;
