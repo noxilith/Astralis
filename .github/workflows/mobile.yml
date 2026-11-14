@@ -67,19 +67,45 @@ jobs:
           done
           grep -n 'uses-permission' "$M"
 
+      # The opening screen: dark (the app's own colour), never white; the icon is the Astralis logo.
+      - name: Dark opening screen
+        working-directory: apps/desktop
+        run: |
+          R=src-tauri/gen/android/app/src/main/res
+          for T in "$R"/values/themes.xml "$R"/values-night/themes.xml; do
+            [ -f "$T" ] || continue
+            sed -i 's#</style>#    <item name="android:windowBackground">@color/astralis_dark</item>\n        <item name="android:windowSplashScreenBackground">@color/astralis_dark</item>\n        <item name="android:statusBarColor">@color/astralis_dark</item>\n        <item name="android:navigationBarColor">@color/astralis_dark</item>\n    </style>#' "$T"
+          done
+          mkdir -p "$R/values"
+          printf '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="astralis_dark">#0e0d17</color>\n</resources>\n' > "$R/values/astralis_colors.xml"
+          cat "$R"/values/themes.xml
+
+      # A release build (optimised: the debug one is far too slow), signed with a throwaway key so
+      # it installs. A new key each build, so an older install has to be removed first.
       - name: Build the APK
         working-directory: apps/desktop
         run: >
-          npx tauri android build --apk --debug --target aarch64 --target x86_64
+          npx tauri android build --apk --target aarch64 --target x86_64
           --config '{"bundle":{"resources":{}}}'
           -- --no-default-features
 
-      - run: find apps/desktop/src-tauri/gen/android -name '*.apk'
+      - name: Sign
+        run: |
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          IN=$(find apps/desktop/src-tauri/gen/android -name '*release-unsigned.apk' | head -1)
+          [ -n "$IN" ] || { echo "::error::No release APK found"; find apps/desktop/src-tauri/gen/android -name '*.apk'; exit 1; }
+          keytool -genkeypair -keystore "$RUNNER_TEMP/astralis.jks" -storepass android -keypass android -alias astralis \
+            -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Astralis"
+          mkdir -p dist
+          "$BT/zipalign" -f -p 4 "$IN" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" sign --ks "$RUNNER_TEMP/astralis.jks" --ks-pass pass:android --key-pass pass:android \
+            --out dist/Astralis-android.apk "$RUNNER_TEMP/aligned.apk"
+          ls -l dist
 
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: apps/desktop/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          path: dist/Astralis-android.apk
           if-no-files-found: error
 
   ios:

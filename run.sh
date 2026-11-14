@@ -189,6 +189,13 @@ android_emulator() {
         echo "Creating the virtual phone…"
         echo no | "$bin/avdmanager" create avd -n "$avd" -k "$image" -d pixel_6 --force
     fi
+    # Software graphics are the slow part, so keep the screen small (720x1560) and give it cores and
+    # memory. Change ASTRALIS_EMU_CORES / ASTRALIS_EMU_RAM (MB) / ASTRALIS_EMU_GPU to taste.
+    local cfg="$ANDROID_AVD_HOME/$avd.avd/config.ini" k v
+    for kv in "hw.lcd.width=720" "hw.lcd.height=1560" "hw.lcd.density=320" "hw.ramSize=${ASTRALIS_EMU_RAM:-4096}" "hw.cpu.ncore=${ASTRALIS_EMU_CORES:-4}" "disk.dataPartition.size=6G"; do
+        k="${kv%%=*}"; v="${kv#*=}"
+        if grep -q "^$k=" "$cfg"; then sed -i "s|^$k=.*|$k=$v|" "$cfg"; else echo "$k=$v" >> "$cfg"; fi
+    done
 
     # The app: ASTRALIS_APK=/path/to.apk, else the newest successful "Mobile" build from GitHub.
     local apk="${ASTRALIS_APK:-}"
@@ -208,7 +215,7 @@ android_emulator() {
 
     if ! "$adb" devices | grep -q "^emulator-.*device$"; then
         echo "Starting the emulator…"
-        nohup "$ANDROID_HOME/emulator/emulator" -avd "$avd" -no-window -gpu swiftshader_indirect -no-snapshot-save -no-boot-anim "$@" >"$base/emulator.log" 2>&1 &
+        nohup "$ANDROID_HOME/emulator/emulator" -avd "$avd" -no-window -gpu "${ASTRALIS_EMU_GPU:-swangle_indirect}" -cores "${ASTRALIS_EMU_CORES:-4}" -no-snapshot-save -no-boot-anim "$@" >"$base/emulator.log" 2>&1 &
         local epid=$!
         until [[ "$("$adb" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == 1 ]]; do
             if ! kill -0 "$epid" 2>/dev/null; then
@@ -221,7 +228,15 @@ android_emulator() {
         done
     fi
     echo "Installing Astralis…"
-    "$adb" install -r -g "$apk"
+    if ! out="$("$adb" install -r -g "$apk" 2>&1)"; then
+        if grep -q 'INSTALL_FAILED_UPDATE_INCOMPATIBLE' <<<"$out"; then
+            echo "An older build with a different signature is installed; replacing it (its data goes)."
+            "$adb" uninstall app.astralis.desktop >/dev/null
+            "$adb" install -r -g "$apk"
+        else
+            echo "$out" >&2; exit 1
+        fi
+    fi
     "$adb" shell monkey -p app.astralis.desktop -c android.intent.category.LAUNCHER 1 >/dev/null
     echo "Astralis is running in the emulator. Logs:  $adb logcat | grep -i astralis"
     # The emulator runs without a window of its own (its window needs X11, which Wayland-only setups
@@ -234,7 +249,7 @@ android_emulator() {
     fi
     echo "Close the phone window to stop viewing; the emulator keeps running (stop it with: $adb emu kill)."
     [[ -n "${WAYLAND_DISPLAY:-}" && -z "${SDL_VIDEODRIVER:-}" ]] && export SDL_VIDEODRIVER=wayland
-    ADB="$adb" "$scr/scrcpy" --window-title "Astralis (Android)" --stay-awake
+    ADB="$adb" "$scr/scrcpy" --window-title "Astralis (Android)" --stay-awake --max-fps 30 -m 1280
 }
 cmd="${1:-test}"
 [ $# -gt 0 ] && shift
