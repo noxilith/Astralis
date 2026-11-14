@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
 import App from './App'
+import { installAndroidBars } from './lib/androidBars'
 
 // Browser preview (`./run.sh ui`): no Tauri runtime, so use an in-memory mock backend.
 if (import.meta.env.DEV && !('__TAURI_INTERNALS__' in window)) {
@@ -15,6 +16,7 @@ document.addEventListener('contextmenu', (e) => {
   e.preventDefault()
 })
 
+installAndroidBars()
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <App />

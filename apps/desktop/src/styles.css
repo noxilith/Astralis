@@ -939,12 +939,12 @@ img.assistant-orb.avatar, .assistant-orb.avatar-preview img { object-fit: cover;
 img.assistant-orb.avatar { background: var(--bg-elev-2); }
 
 /* ---------- phone layout (see MobileShell) ---------- */
-:root { --m-tabs-h: calc(58px + env(safe-area-inset-bottom)); }
+:root { --m-tabs-h: calc(58px + var(--safe-bottom, env(safe-area-inset-bottom))); }
 html { -webkit-text-size-adjust: 100%; }
 .app.compact { display: block; height: 100dvh; position: relative; overflow: hidden; }
-.m-main { height: calc(100dvh - var(--m-tabs-h)); padding-top: env(safe-area-inset-top); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.m-main { height: calc(100dvh - var(--m-tabs-h)); padding-top: var(--safe-top, env(safe-area-inset-top)); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .m-tabs {
-  position: fixed; left: 0; right: 0; bottom: 0; height: var(--m-tabs-h); padding-bottom: env(safe-area-inset-bottom);
+  position: fixed; left: 0; right: 0; bottom: 0; height: var(--m-tabs-h); padding-bottom: var(--safe-bottom, env(safe-area-inset-bottom));
   display: grid; grid-template-columns: repeat(5, 1fr); background: var(--bg-elev); border-top: 1px solid var(--border); z-index: 30;
 }
 .m-tab { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; border: 0; background: none; color: var(--text-faint); font-size: 11px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
@@ -987,3 +987,7 @@ html { -webkit-text-size-adjust: 100%; }
 .compact .has-detail { grid-template-rows: minmax(0, 1fr) !important; }
 .compact .task-detail { overflow: auto; }
 .compact .task-back { display: inline-flex; }
+
+/* Android pads the app around the system bars itself (see lib/androidBars.ts), so the page adds none. */
+html.android { --safe-top: 0px; --safe-bottom: 0px; --safe-left: 0px; --safe-right: 0px; }
+html.android .m-tabs { background: var(--bg); }

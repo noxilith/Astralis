@@ -93,9 +93,13 @@ jobs:
           cat > "$A" <<KT
           package $PKG
 
+          import android.graphics.Color
           import android.os.Bundle
           import android.view.View
+          import android.webkit.JavascriptInterface
+          import android.webkit.WebView
           import androidx.core.view.ViewCompat
+          import androidx.core.view.WindowCompat
           import androidx.core.view.WindowInsetsCompat
 
           class MainActivity : TauriActivity() {
@@ -107,6 +111,24 @@ jobs:
                 v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
                 WindowInsetsCompat.CONSUMED
               }
+            }
+
+            // The page tells us its colour: painted behind the bars, with light or dark bar icons.
+            override fun onWebViewCreate(webView: WebView) {
+              webView.addJavascriptInterface(object {
+                @JavascriptInterface
+                fun setBars(color: String, light: Boolean) {
+                  runOnUiThread {
+                    try {
+                      findViewById<View>(android.R.id.content).setBackgroundColor(Color.parseColor(color))
+                      val c = WindowCompat.getInsetsController(window, window.decorView)
+                      c.isAppearanceLightStatusBars = light
+                      c.isAppearanceLightNavigationBars = light
+                    } catch (e: Exception) {
+                    }
+                  }
+                }
+              }, "AstralisBars")
             }
           }
           KT
