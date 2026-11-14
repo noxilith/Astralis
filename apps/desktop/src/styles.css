@@ -975,3 +975,15 @@ html { -webkit-text-size-adjust: 100%; }
 .compact .modal, .compact .modal-card { max-width: calc(100vw - 20px); }
 .compact .find-panel, .compact .preview-find { width: calc(100% - 20px); margin-right: 10px; }
 .app.compact ~ .toasts, .compact .toasts { bottom: calc(var(--m-tabs-h) + 10px); right: 10px; left: 10px; }
+
+/* Phone: the task filters become one scrolling row, so the list gets the screen. */
+.compact .tasks-split { grid-template-rows: auto minmax(0, 1fr) !important; }
+.compact .task-filters { display: flex; flex-direction: row; align-items: center; gap: 6px; overflow-x: auto; overflow-y: hidden; padding: 8px 10px !important; border-right: 0; border-bottom: 1px solid var(--border); scrollbar-width: none; }
+.compact .task-filters::-webkit-scrollbar { display: none; }
+.compact .task-filters .nav-item { flex: 0 0 auto; width: auto; white-space: nowrap; min-height: 36px; padding: 0 12px; border-radius: 999px; }
+.compact .task-filters .nav-section { display: none; }
+.task-back { display: none; }
+.compact .has-detail .task-filters, .compact .has-detail .task-list { display: none; }
+.compact .has-detail { grid-template-rows: minmax(0, 1fr) !important; }
+.compact .task-detail { overflow: auto; }
+.compact .task-back { display: inline-flex; }

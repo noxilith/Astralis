@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Bell, CalendarDays, Check, CheckCircle2, Inbox, ListTodo, Repeat, StickyNote, Sun, Trash2 } from 'lucide-react'
+import { Bell, CalendarDays, Check, ChevronLeft, CheckCircle2, Inbox, ListTodo, Repeat, StickyNote, Sun, Trash2 } from 'lucide-react'
 import { api, type Frequency, type Id, type Planner, type Task, type TaskFilter, type TaskPatch } from '../api'
 import { useApp } from '../context'
 import { Empty, PRIORITY_COLORS, PRIORITY_LABELS, useConfirm } from '../components/ui'
@@ -107,8 +107,8 @@ export function TasksView() {
   const now = Date.now()
 
   return (
-    <div className="split" style={{ gridTemplateColumns: selected ? '220px minmax(0,1fr) 340px' : '220px minmax(0,1fr)' }}>
-      <div className="pane" style={{ padding: 10 }}>
+    <div className={'split tasks-split' + (selected ? ' has-detail' : '')} style={{ gridTemplateColumns: selected ? '220px minmax(0,1fr) 340px' : '220px minmax(0,1fr)' }}>
+      <div className="pane task-filters" style={{ padding: 10 }}>
         {LISTS.map((l) => (
           <button key={l.key} className={'nav-item' + (list === l.key ? ' active' : '')} onClick={() => setList(l.key)}>
             {l.icon} {l.label}
@@ -123,7 +123,7 @@ export function TasksView() {
         ))}
       </div>
 
-      <div className="pane">
+      <div className="pane task-list">
         <div className="pane-header">
           <strong>{listLabel}</strong>
           <span className="faint small">{tasks.length}</span>
@@ -171,7 +171,8 @@ export function TasksView() {
       </div>
 
       {selected && (
-        <div className="pane">
+        <div className="pane task-detail">
+          <button className="m-back task-back" onClick={() => setTaskId(null)}><ChevronLeft size={22} /> Tasks</button>
           <TaskDetails
             key={selected.id}
             task={selected}
