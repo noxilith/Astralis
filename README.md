@@ -263,7 +263,7 @@ flowchart LR
 |---|---|
 | `crates/astralis-core` | All app logic, UI-agnostic and tested: notes, vaults, encryption, sync, the Brain, the AI |
 | `crates/astralis-net` | Peer-to-peer: pairing, sync, live editing |
-| `crates/astralis-cloud` | Google sign-in, Drive client, end-to-end encrypted cloud sync |
+| `crates/astralis-cloud` | Google sign-in, Drive client, encrypted cloud sync |
 | `crates/astralis-mcp` | The Brain's MCP server for AI agents |
 | `apps/desktop` | The Tauri 2 app: Rust commands in `src-tauri/`, React + TypeScript UI in `src/` |
 | `skills/astralis-brain` | The skill that teaches AI agents to use the Brain |
