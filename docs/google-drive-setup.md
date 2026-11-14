@@ -66,12 +66,14 @@ Drive; each person still signs in and approves access.
 
 ## What's stored where
 
-- **On the Drive:** only end-to-end encrypted sync files (`*.astr`). Google sees ciphertext, plus
-  the vault's name as the folder name.
-- **The vault's key:** never on the Drive. It goes from your device to members over the
-  encrypted P2P connection.
+- **On the Drive:** only encrypted sync files (`*.astr`), plus the vault's name as the folder name.
+- **The vault's key:** not in the vault's own (shared) folder. It goes from your device to people you invite over the
+  encrypted P2P connection. For your own devices, it's also kept in the private data of the top-level
+  `Astralis` folder (never shared), so **Add existing cloud vault…** works without the other device open.
+  That means Google can read both the encrypted files and that key; it protects the files from anyone who only
+  gets the files, not from Google itself.
 - **Your own devices** signed in to the same Google account sync through the Drive even when
-  they're never online together.
+  they're never online together. On another device, choose **Add existing cloud vault…** in the vault menu to add a vault from your Drive.
 - **Between different people,** edits flow P2P whenever two members are online. Google only lets
   each person's copy of Astralis read Drive files it made itself or that the person picked (that
   is how `drive.file` works). So the Drive acts as the offline mailbox for your own devices.

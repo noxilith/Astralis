@@ -82,7 +82,7 @@ Updates shows your version and lets you check any time.
     <td width="50%" valign="top">
       <h3>📡 Sync without a server</h3>
       Peer-to-peer between your devices, live editing with named carets, shared vaults, and
-      Google Drive with end-to-end encryption. No Astralis account, no Astralis cloud.
+      Google Drive with encrypted files. No Astralis account, no Astralis cloud.
     </td>
   </tr>
 </table>
@@ -180,7 +180,7 @@ conventions, gotchas, a map of the code) plus a section about you.
   never touches their others, and disappears when you stop sharing.
 - **Google Drive**: keep a vault on your Drive and invite people by email. Drive keeps your own
   devices in sync, even when they're never online at the same time; the people you invite sync
-  with you peer-to-peer while you're both online. Everything on Drive is end-to-end encrypted, and
+  with you peer-to-peer while you're both online. Files on Drive are encrypted, and
   the app can only see the files it created. See
   [docs/google-drive-setup.md](docs/google-drive-setup.md) to build with your own Google client.
 
