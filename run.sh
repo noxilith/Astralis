@@ -208,7 +208,7 @@ android_emulator() {
 
     if ! "$adb" devices | grep -q "^emulator-.*device$"; then
         echo "Starting the emulator…"
-        nohup "$ANDROID_HOME/emulator/emulator" -avd "$avd" -no-snapshot-save -no-boot-anim "$@" >"$base/emulator.log" 2>&1 &
+        nohup "$ANDROID_HOME/emulator/emulator" -avd "$avd" -no-window -gpu swiftshader_indirect -no-snapshot-save -no-boot-anim "$@" >"$base/emulator.log" 2>&1 &
         local epid=$!
         until [[ "$("$adb" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == 1 ]]; do
             if ! kill -0 "$epid" 2>/dev/null; then
@@ -224,6 +224,17 @@ android_emulator() {
     "$adb" install -r -g "$apk"
     "$adb" shell monkey -p app.astralis.desktop -c android.intent.category.LAUNCHER 1 >/dev/null
     echo "Astralis is running in the emulator. Logs:  $adb logcat | grep -i astralis"
+    # The emulator runs without a window of its own (its window needs X11, which Wayland-only setups
+    # lack); scrcpy shows the phone's screen instead, and you can click and type in it.
+    local scr="$base/scrcpy"
+    if [[ ! -x "$scr/scrcpy" ]]; then
+        echo "Downloading scrcpy (one time)…"
+        rm -rf "$scr" && mkdir -p "$scr"
+        curl -fL --progress-bar "https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-linux-x86_64-v5.0.1.tar.gz" | tar -xz -C "$scr" --strip-components=1
+    fi
+    echo "Close the phone window to stop viewing; the emulator keeps running (stop it with: $adb emu kill)."
+    [[ -n "${WAYLAND_DISPLAY:-}" && -z "${SDL_VIDEODRIVER:-}" ]] && export SDL_VIDEODRIVER=wayland
+    ADB="$adb" "$scr/scrcpy" --window-title "Astralis (Android)" --stay-awake
 }
 cmd="${1:-test}"
 [ $# -gt 0 ] && shift
