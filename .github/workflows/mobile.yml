@@ -72,6 +72,10 @@ jobs:
         working-directory: apps/desktop
         run: |
           R=src-tauri/gen/android/app/src/main/res
+          # The Astralis icons (made from the logo with `tauri icon`) replace Tauri's default ones.
+          rm -rf "$R"/mipmap-* "$R"/drawable-v24/ic_launcher_foreground.xml "$R"/values/ic_launcher_background.xml
+          cp -r src-tauri/icons/android/. "$R"/
+          ls "$R" "$R"/mipmap-anydpi-v26
           for T in "$R"/values/themes.xml "$R"/values-night/themes.xml; do
             [ -f "$T" ] || continue
             sed -i 's#</style>#    <item name="android:windowBackground">@color/astralis_dark</item>\n        <item name="android:windowSplashScreenBackground">@color/astralis_dark</item>\n        <item name="android:statusBarColor">@color/astralis_dark</item>\n        <item name="android:navigationBarColor">@color/astralis_dark</item>\n    </style>#' "$T"
