@@ -143,7 +143,9 @@ async fn catch_redirect(listener: &TcpListener) -> Result<Vec<(String, String)>>
         let body = format!(
             "<!doctype html><meta charset=utf-8><title>Astralis</title>\
              <body style=\"font-family:system-ui;background:#0f0f14;color:#e8e8f0;display:grid;place-items:center;height:100vh;margin:0\">\
-             <div style=\"text-align:center\"><h2>{}</h2><p>You can close this tab and go back to Astralis.</p></div>",
+             <div style=\"text-align:center\"><h2>{}</h2><p>You can close this tab and go back to Astralis.</p>\
+             <p><a id=back style=\"display:none;padding:10px 18px;border-radius:10px;background:#8b7bff;color:#fff;text-decoration:none\" href=\"intent:#Intent;package=app.astralis.desktop;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;end\">Back to Astralis</a></p></div>\
+             <script>if(/Android/.test(navigator.userAgent))document.getElementById('back').style.display='inline-block'</script>",
             if ok { "Connected to Astralis" } else { "Sign-in cancelled" }
         );
         let resp = format!(
@@ -156,18 +158,31 @@ async fn catch_redirect(listener: &TcpListener) -> Result<Vec<(String, String)>>
 }
 
 async fn exchange(http: &reqwest::Client, cfg: &ClientConfig, code: &str, verifier: &str, redirect: &str) -> Result<Tokens> {
-    let resp = http
-        .post(TOKEN_URL)
-        .form(&[
-            ("client_id", cfg.client_id.as_str()),
-            ("client_secret", cfg.client_secret.as_str()),
-            ("code", code),
-            ("code_verifier", verifier),
-            ("grant_type", "authorization_code"),
-            ("redirect_uri", redirect),
-        ])
-        .send()
-        .await?;
+    // On a phone the app is in the background while the browser is in front, and the system blocks its
+    // network until you come back. The code stays valid for minutes: keep trying until you do.
+    let mut tries = 0;
+    let resp = loop {
+        let sent = http
+            .post(TOKEN_URL)
+            .form(&[
+                ("client_id", cfg.client_id.as_str()),
+                ("client_secret", cfg.client_secret.as_str()),
+                ("code", code),
+                ("code_verifier", verifier),
+                ("grant_type", "authorization_code"),
+                ("redirect_uri", redirect),
+            ])
+            .send()
+            .await;
+        match sent {
+            Ok(r) => break r,
+            Err(e) if tries < 60 && (e.is_connect() || e.is_timeout() || e.is_request()) => {
+                tries += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
     token_response(resp, None).await
 }
 
