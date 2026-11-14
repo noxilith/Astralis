@@ -66,6 +66,9 @@ jobs:
             grep -q "android.permission.$P" "$M" || sed -i "s#<uses-permission android:name=\"android.permission.INTERNET\" />#&\n    <uses-permission android:name=\"android.permission.$P\" />#" "$M"
           done
           grep -n 'uses-permission' "$M"
+          # astralis:// links open the app (the "Back to Astralis" button after signing in to Google).
+          sed -i '0,/<\/activity>/s##    <intent-filter>\n                <action android:name="android.intent.action.VIEW" />\n                <category android:name="android.intent.category.DEFAULT" />\n                <category android:name="android.intent.category.BROWSABLE" />\n                <data android:scheme="astralis" />\n            </intent-filter>\n        </activity>#' "$M"
+          cat "$M"
 
       # The opening screen: dark (the app's own colour), never white; the icon is the Astralis logo.
       - name: Dark opening screen

@@ -144,7 +144,7 @@ async fn catch_redirect(listener: &TcpListener) -> Result<Vec<(String, String)>>
             "<!doctype html><meta charset=utf-8><title>Astralis</title>\
              <body style=\"font-family:system-ui;background:#0f0f14;color:#e8e8f0;display:grid;place-items:center;height:100vh;margin:0\">\
              <div style=\"text-align:center\"><h2>{}</h2><p>You can close this tab and go back to Astralis.</p>\
-             <p><a id=back style=\"display:none;padding:10px 18px;border-radius:10px;background:#8b7bff;color:#fff;text-decoration:none\" href=\"intent:#Intent;package=app.astralis.desktop;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;end\">Back to Astralis</a></p></div>\
+             <p><a id=back style=\"display:none;padding:10px 18px;border-radius:10px;background:#8b7bff;color:#fff;text-decoration:none\" href=\"astralis://signin-done\">Back to Astralis</a></p></div>\
              <script>if(/Android/.test(navigator.userAgent))document.getElementById('back').style.display='inline-block'</script>",
             if ok { "Connected to Astralis" } else { "Sign-in cancelled" }
         );
