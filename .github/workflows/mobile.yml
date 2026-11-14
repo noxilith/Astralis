@@ -1,0 +1,173 @@
+# Phone builds. Run by hand (Actions → Mobile → Run workflow).
+#   Android  a debug-signed APK you can install straight away (artifact "android-apk")
+#   iOS      only when the Apple secrets exist (see the notes in the iOS job)
+# Phones build without the in-app models (Ask Astralis and the Brain's embeddings): --no-default-features.
+
+name: Mobile
+
+on:
+  workflow_dispatch:
+    inputs:
+      ios:
+        description: "Also build the iPhone app (needs the Apple secrets)"
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  ASTRALIS_GOOGLE_CLIENT_ID: ${{ secrets.ASTRALIS_GOOGLE_CLIENT_ID }}
+  ASTRALIS_GOOGLE_CLIENT_SECRET: ${{ secrets.ASTRALIS_GOOGLE_CLIENT_SECRET }}
+
+jobs:
+  android:
+    name: Android
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: NDK
+        run: |
+          sdkmanager "ndk;27.2.12479018" "platforms;android-35" "build-tools;35.0.0"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Android project
+        working-directory: apps/desktop
+        run: |
+          npx tauri android init --ci
+          # Internet and notifications (reminders).
+          M=src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          grep -q 'POST_NOTIFICATIONS' "$M" || sed -i 's#<uses-permission android:name="android.permission.INTERNET" />#&\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />#' "$M"
+          grep -n 'uses-permission' "$M"
+
+      - name: Build the APK
+        working-directory: apps/desktop
+        run: >
+          npx tauri android build --apk --debug --target aarch64
+          --config '{"bundle":{"resources":{}}}'
+          -- --no-default-features
+
+      - run: find apps/desktop/src-tauri/gen/android -name '*.apk'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: apps/desktop/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+
+  ios:
+    name: iPhone
+    if: ${{ inputs.ios }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      # Secrets to create in the repository (Settings → Secrets and variables → Actions):
+      #   APPLE_TEAM_ID                  your 10-character Team ID
+      #   APPLE_CERTIFICATE              base64 of the "Apple Distribution" .p12 certificate
+      #   APPLE_CERTIFICATE_PASSWORD     the .p12's password
+      #   APPLE_PROVISIONING_PROFILE     base64 of the App Store .mobileprovision for app.astralis.desktop
+      #   APPSTORE_KEY_ID / APPSTORE_ISSUER_ID / APPSTORE_KEY_P8   App Store Connect API key (for TestFlight)
+      - name: Check the Apple secrets
+        run: |
+          for V in APPLE_TEAM_ID APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_PROVISIONING_PROFILE; do
+            eval "[ -n \"\${$V}\" ]" || { echo "::error::Secret $V is not set"; exit 1; }
+          done
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+
+      - name: Signing
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+        run: |
+          KC="$RUNNER_TEMP/build.keychain"
+          security create-keychain -p ci "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p ci "$KC"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$KC"
+          security list-keychains -d user -s "$KC" login.keychain
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "$APPLE_PROVISIONING_PROFILE" | base64 --decode > "$HOME/Library/MobileDevice/Provisioning Profiles/astralis.mobileprovision"
+
+      - name: iOS project
+        working-directory: apps/desktop
+        run: npx tauri ios init --ci
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Build the IPA
+        working-directory: apps/desktop
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: >
+          npx tauri ios build --export-method app-store-connect
+          --config '{"bundle":{"resources":{}}}'
+          -- --no-default-features
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: apps/desktop/src-tauri/gen/apple/build/arm64/*.ipa
+          if-no-files-found: error
+
+      - name: Upload to TestFlight
+        if: ${{ env.KEY_ID != '' }}
+        env:
+          KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+          ISSUER: ${{ secrets.APPSTORE_ISSUER_ID }}
+          KEY_P8: ${{ secrets.APPSTORE_KEY_P8 }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$KEY_P8" > ~/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8
+          xcrun altool --upload-app --type ios -f apps/desktop/src-tauri/gen/apple/build/arm64/*.ipa \
+            --apiKey "$KEY_ID" --apiIssuer "$ISSUER"
