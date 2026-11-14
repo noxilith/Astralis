@@ -25,7 +25,8 @@
   <a href="#-ask-astralis">Ask Astralis</a> ·
   <a href="#-the-brain">The Brain</a> ·
   <a href="#-sync-and-collaboration">Sync</a> ·
-  <a href="#-build-and-run">Build</a>
+  <a href="#-build-and-run">Build</a> ·
+  <a href="https://github.com/noxilith/Astralis/wiki">Wiki</a>
 </p>
 
 <p align="center">
