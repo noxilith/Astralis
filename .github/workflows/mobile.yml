@@ -84,6 +84,33 @@ jobs:
           printf '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="astralis_dark">#0e0d17</color>\n</resources>\n' > "$R/values/astralis_colors.xml"
           cat "$R"/values/themes.xml
 
+          # The system bars: Android pads the app below the status bar and above the navigation bar
+          # itself, and tells the web page there is nothing left to pad (otherwise the page adds its
+          # own space for the status bar as well, leaving a gap at the top).
+          A=$(find src-tauri/gen/android -name MainActivity.kt | head -1)
+          PKG=$(sed -n 's/^package \(.*\)/\1/p' "$A" | head -1)
+          cat "$A"
+          cat > "$A" <<KT
+          package $PKG
+
+          import android.os.Bundle
+          import android.view.View
+          import androidx.core.view.ViewCompat
+          import androidx.core.view.WindowInsetsCompat
+
+          class MainActivity : TauriActivity() {
+            override fun onCreate(savedInstanceState: Bundle?) {
+              super.onCreate(savedInstanceState)
+              val content = findViewById<View>(android.R.id.content)
+              ViewCompat.setOnApplyWindowInsetsListener(content) { v, insets ->
+                val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+                v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+                WindowInsetsCompat.CONSUMED
+              }
+            }
+          }
+          KT
+
       # A release build (optimised: the debug one is far too slow), signed with a throwaway key so
       # it installs. A new key each build, so an older install has to be removed first.
       - name: Build the APK
