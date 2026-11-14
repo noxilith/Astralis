@@ -30,11 +30,9 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - uses: android-actions/setup-android@v3
-
       - name: NDK
         run: |
-          sdkmanager "ndk;27.2.12479018" "platforms;android-35" "build-tools;35.0.0"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018" "platforms;android-35" "build-tools;35.0.0"
           echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
@@ -161,12 +159,12 @@ jobs:
           if-no-files-found: error
 
       - name: Upload to TestFlight
-        if: ${{ env.KEY_ID != '' }}
         env:
           KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
           ISSUER: ${{ secrets.APPSTORE_ISSUER_ID }}
           KEY_P8: ${{ secrets.APPSTORE_KEY_P8 }}
         run: |
+          [ -n "$KEY_ID" ] || { echo "No App Store Connect key: skipping TestFlight."; exit 0; }
           mkdir -p ~/.appstoreconnect/private_keys
           echo "$KEY_P8" > ~/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8
           xcrun altool --upload-app --type ios -f apps/desktop/src-tauri/gen/apple/build/arm64/*.ipa \
