@@ -231,8 +231,14 @@ impl Net {
         });
         let router = Router::builder(endpoint.clone()).accept(ALPN, Handler(inner.clone())).spawn();
 
-        if options.mdns {
-            let mdns = MdnsAddressLookup::builder().build(endpoint.id())?;
+        // Finding devices on the same network is a bonus: some phones refuse it, and syncing over the
+        // internet must still work then.
+        let mdns = if options.mdns {
+            MdnsAddressLookup::builder().build(endpoint.id()).map_err(|e| eprintln!("astralis: local discovery is off: {e:#}")).ok()
+        } else {
+            None
+        };
+        if let Some(mdns) = mdns {
             endpoint.address_lookup()?.add(mdns.clone());
             let inner2 = inner.clone();
             tokio::spawn(async move {

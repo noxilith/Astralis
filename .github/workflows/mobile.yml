@@ -1,3 +1,7 @@
+          # Syncing between devices: network state, and discovering devices on the same Wi-Fi.
+          for P in ACCESS_NETWORK_STATE ACCESS_WIFI_STATE CHANGE_WIFI_MULTICAST_STATE; do
+            grep -q "android.permission.$P" "$M" || sed -i "s#<uses-permission android:name=\"android.permission.INTERNET\" />#&\n    <uses-permission android:name=\"android.permission.$P\" />#" "$M"
+          done
 # Phone builds. Run by hand (Actions → Mobile → Run workflow).
 #   Android  a debug-signed APK you can install straight away (artifact "android-apk")
 #   iOS      only when the Apple secrets exist (see the notes in the iOS job)
@@ -61,6 +65,10 @@ jobs:
           # Internet and notifications (reminders).
           M=src-tauri/gen/android/app/src/main/AndroidManifest.xml
           grep -q 'POST_NOTIFICATIONS' "$M" || sed -i 's#<uses-permission android:name="android.permission.INTERNET" />#&\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />#' "$M"
+          # Syncing between devices: network state, and finding devices on the same Wi-Fi.
+          for P in ACCESS_NETWORK_STATE ACCESS_WIFI_STATE CHANGE_WIFI_MULTICAST_STATE; do
+            grep -q "android.permission.$P" "$M" || sed -i "s#<uses-permission android:name=\"android.permission.INTERNET\" />#&\n    <uses-permission android:name=\"android.permission.$P\" />#" "$M"
+          done
           grep -n 'uses-permission' "$M"
 
       - name: Build the APK
@@ -142,6 +150,15 @@ jobs:
         run: npx tauri ios init --ci
         env:
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+
+      # Local-network access (finding your other devices on the same Wi-Fi).
+      - name: Local network permission text
+        working-directory: apps/desktop
+        run: >
+          P=$(find src-tauri/gen/apple -name Info.plist -not -path "*/build/*" | head -1);
+          [ -f "$P" ] && /usr/libexec/PlistBuddy
+          -c "Add :NSLocalNetworkUsageDescription string Astralis finds your other devices on this network to sync notes."
+          -c "Add :NSBonjourServices array" -c "Add :NSBonjourServices:0 string _irohv1._udp" "$P" || echo "no Info.plist at $P"
 
       - name: Build the IPA
         working-directory: apps/desktop
