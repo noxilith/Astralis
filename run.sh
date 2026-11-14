@@ -193,9 +193,17 @@ android_emulator() {
 
     if ! "$adb" devices | grep -q "^emulator-.*device$"; then
         echo "Starting the emulator…"
-        (nohup "$ANDROID_HOME/emulator/emulator" -avd "$avd" -no-snapshot-save -no-boot-anim "$@" >"$base/emulator.log" 2>&1 &)
-        "$adb" wait-for-device
-        until [[ "$("$adb" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == 1 ]]; do sleep 2; done
+        nohup "$ANDROID_HOME/emulator/emulator" -avd "$avd" -no-snapshot-save -no-boot-anim "$@" >"$base/emulator.log" 2>&1 &
+        local epid=$!
+        until [[ "$("$adb" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == 1 ]]; do
+            if ! kill -0 "$epid" 2>/dev/null; then
+                echo "The emulator stopped. Its log ($base/emulator.log):" >&2
+                tail -8 "$base/emulator.log" >&2
+                echo "On Arch a missing library is fixed with:  sudo pacman -S --needed libxkbfile" >&2
+                exit 1
+            fi
+            sleep 2
+        done
     fi
     echo "Installing Astralis…"
     "$adb" install -r -g "$apk"
