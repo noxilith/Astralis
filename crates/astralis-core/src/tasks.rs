@@ -477,13 +477,23 @@ impl Store {
 
     /// Task and event reminders whose time has come and that haven't fired yet.
     pub fn due_reminders(&self, now: Timestamp) -> Result<Vec<Reminder>> {
+        self.reminders_in(i64::MIN, now)
+    }
+
+    /// Reminders still to come in the next stretch (phones hand these to the system to fire).
+    pub fn upcoming_reminders(&self, now: Timestamp, until: Timestamp) -> Result<Vec<Reminder>> {
+        self.reminders_in(now, until)
+    }
+
+    /// Unfired reminders with `after < remind_at <= upto`.
+    fn reminders_in(&self, after: Timestamp, upto: Timestamp) -> Result<Vec<Reminder>> {
         let mut out = Vec::new();
         {
             let mut stmt = self.conn.prepare(
                 "SELECT id, title, remind_at, due_at FROM tasks
-                 WHERE reminded = 0 AND remind_at IS NOT NULL AND remind_at <= ?1 AND status != 'done'",
+                 WHERE reminded = 0 AND remind_at IS NOT NULL AND remind_at > ?1 AND remind_at <= ?2 AND status != 'done'",
             )?;
-            let rows = stmt.query_map([now], |r| {
+            let rows = stmt.query_map([after, upto], |r| {
                 Ok(Reminder {
                     kind: ReminderKind::Task,
                     id: uuid_col(r, 0)?,
@@ -499,9 +509,9 @@ impl Store {
         {
             let mut stmt = self.conn.prepare(
                 "SELECT id, title, remind_at, start_at FROM events
-                 WHERE reminded = 0 AND remind_at IS NOT NULL AND remind_at <= ?1",
+                 WHERE reminded = 0 AND remind_at IS NOT NULL AND remind_at > ?1 AND remind_at <= ?2",
             )?;
-            let rows = stmt.query_map([now], |r| {
+            let rows = stmt.query_map([after, upto], |r| {
                 Ok(Reminder {
                     kind: ReminderKind::Event,
                     id: uuid_col(r, 0)?,

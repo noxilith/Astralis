@@ -64,7 +64,9 @@ fn find_model_dir(app: &AppHandle) -> Option<PathBuf> {
 /// Fires task/event reminders as system notifications and tells the UI.
 fn spawn_reminder_loop(app: AppHandle, state: SharedState) {
     std::thread::spawn(move || {
+        let mut scheduled = mobile_reminders::Scheduled::default();
         loop {
+            scheduled.sync(&app, &state);
             let due = {
                 let store = state.store.lock().unwrap();
                 let due = store.due_reminders(now_ms()).unwrap_or_default();
@@ -74,12 +76,15 @@ fn spawn_reminder_loop(app: AppHandle, state: SharedState) {
                 due
             };
             for r in due {
-                let _ = app
-                    .notification()
-                    .builder()
-                    .title("Astralis reminder")
-                    .body(&r.title)
-                    .show();
+                // On a phone the system already showed the ones it was handed.
+                if !scheduled.handed_over(&r) {
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("Astralis reminder")
+                        .body(&r.title)
+                        .show();
+                }
                 let _ = app.emit("reminder", &r);
             }
             std::thread::sleep(Duration::from_secs(15));
@@ -186,5 +191,63 @@ impl OpenerPlugin for tauri::Builder<tauri::Wry> {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     fn plugin_opener(self) -> Self {
         self
+    }
+}
+
+/// Phones suspend the app in the background, so its reminder loop can't fire them. The next
+/// reminders are handed to the system as scheduled notifications instead (and re-handed whenever
+/// they change). On desktop none of this does anything.
+mod mobile_reminders {
+    use super::*;
+
+    #[derive(Default)]
+    pub struct Scheduled {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        sent: std::collections::HashMap<uuid::Uuid, i64>,
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    impl Scheduled {
+        pub fn sync(&mut self, _: &AppHandle, _: &SharedState) {}
+        pub fn handed_over(&self, _: &astralis_core::Reminder) -> bool {
+            false
+        }
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    impl Scheduled {
+        pub fn sync(&mut self, app: &AppHandle, state: &SharedState) {
+            use tauri_plugin_notification::Schedule;
+            const AHEAD: i64 = 14 * 24 * 3600 * 1000;
+            let now = now_ms();
+            let upcoming = state.store.lock().unwrap().upcoming_reminders(now, now + AHEAD).unwrap_or_default();
+            let wanted: std::collections::HashMap<_, _> = upcoming.iter().take(60).map(|r| (r.id, r.remind_at)).collect();
+            // Only touch the system when something was added, moved or removed.
+            let stale = self.sent.iter().any(|(id, at)| *at > now && wanted.get(id) != Some(at));
+            if !stale && wanted.iter().all(|(id, at)| self.sent.get(id) == Some(at)) {
+                return;
+            }
+            let n = app.notification();
+            let _ = n.cancel_all();
+            self.sent.retain(|_, at| *at <= now); // the ones that already fired stay known
+            for r in upcoming.iter().take(60) {
+                let Ok(date) = time::OffsetDateTime::from_unix_timestamp_nanos(r.remind_at as i128 * 1_000_000) else { continue };
+                let id = (r.id.as_u128() as u32 & 0x7fff_ffff) as i32;
+                let shown = n
+                    .builder()
+                    .id(id)
+                    .title("Astralis reminder")
+                    .body(&r.title)
+                    .schedule(Schedule::At { date, repeating: false, allow_while_idle: true })
+                    .show();
+                if shown.is_ok() {
+                    self.sent.insert(r.id, r.remind_at);
+                }
+            }
+        }
+
+        pub fn handed_over(&self, r: &astralis_core::Reminder) -> bool {
+            self.sent.get(&r.id) == Some(&r.remind_at)
+        }
     }
 }

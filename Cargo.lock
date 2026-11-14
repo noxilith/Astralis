@@ -280,6 +280,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-notification",
  "tauri-plugin-opener",
+ "time",
  "tokio",
  "uuid",
  "zip 7.4.0",
