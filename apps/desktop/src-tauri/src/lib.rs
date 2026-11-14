@@ -209,7 +209,7 @@ mod mobile_reminders {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     impl Scheduled {
         pub fn sync(&mut self, _: &AppHandle, _: &SharedState) {}
-        pub fn handed_over(&self, _: &astralis_core::Reminder) -> bool {
+        pub fn handed_over(&self, _: &astralis_core::tasks::Reminder) -> bool {
             false
         }
     }
@@ -246,7 +246,7 @@ mod mobile_reminders {
             }
         }
 
-        pub fn handed_over(&self, r: &astralis_core::Reminder) -> bool {
+        pub fn handed_over(&self, r: &astralis_core::tasks::Reminder) -> bool {
             self.sent.get(&r.id) == Some(&r.remind_at)
         }
     }
