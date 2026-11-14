@@ -1,7 +1,3 @@
-          # Syncing between devices: network state, and discovering devices on the same Wi-Fi.
-          for P in ACCESS_NETWORK_STATE ACCESS_WIFI_STATE CHANGE_WIFI_MULTICAST_STATE; do
-            grep -q "android.permission.$P" "$M" || sed -i "s#<uses-permission android:name=\"android.permission.INTERNET\" />#&\n    <uses-permission android:name=\"android.permission.$P\" />#" "$M"
-          done
 # Phone builds. Run by hand (Actions → Mobile → Run workflow).
 #   Android  a debug-signed APK you can install straight away (artifact "android-apk")
 #   iOS      only when the Apple secrets exist (see the notes in the iOS job)
