@@ -47,6 +47,8 @@ interface Body extends GraphNode {
   corona: string
   /** What it orbits (planets: the sun; moons: their planet), how far out, and how fast. */
   parent: Body | null
+  /** The constellation it belongs to (a note with pages, or one of its pages). */
+  con: Constellation | null
   orbit: number
   phase: number
   speed: number
@@ -65,6 +67,14 @@ interface Body extends GraphNode {
   d: number
   px: number
   shown: boolean
+}
+
+/** A note with pages: the note is the bright star, its pages the stars around it, joined by lines. */
+interface Constellation {
+  root: Body
+  stars: Body[]
+  lines: [Body, Body][]
+  hue: number
 }
 
 interface System {
@@ -101,6 +111,7 @@ interface Galaxy {
   spin: number
   angle: number
   systems: System[]
+  cons: Constellation[]
   stars: Body[]
   bodies: Body[]
   count: number
@@ -731,6 +742,7 @@ function buildGalaxy(input: GalaxyInput, index: number): Galaxy {
     spin: 0.004 + r() * 0.004,
     angle: r() * TAU,
     systems: [],
+    cons: [],
     stars: [],
     bodies: [],
     count: input.nodes.length,
@@ -751,6 +763,7 @@ function buildGalaxy(input: GalaxyInput, index: number): Galaxy {
     color: '',
     corona: '',
     parent: null,
+    con: null,
     orbit: 0,
     // Everything about a note's look comes from its own id, never from the order things are made
     // in, so a planet stays the same planet when other notes change.
@@ -771,9 +784,17 @@ function buildGalaxy(input: GalaxyInput, index: number): Galaxy {
   const tagHue = (nd: GraphNode) => (nd.tags.length ? hashHue(nd.tags[0]) : null)
 
   const byId = new Map(input.nodes.map((n) => [n.id, n]))
+  // Notes with pages are constellations. They stay out of the link systems below.
+  const pagesOf = new Map<string, GraphNode[]>()
+  for (const nd of input.nodes) if (nd.parentId && byId.has(nd.parentId)) pagesOf.set(nd.parentId, [...(pagesOf.get(nd.parentId) ?? []), nd])
+  const inCon = new Set<string>()
+  for (const [root, pages] of pagesOf) {
+    inCon.add(root)
+    for (const p of pages) inCon.add(p.id)
+  }
   const adj = new Map<string, string[]>()
   for (const e of input.edges) {
-    if (!byId.has(e.source) || !byId.has(e.target) || e.source === e.target) continue
+    if (!byId.has(e.source) || !byId.has(e.target) || e.source === e.target || inCon.has(e.source) || inCon.has(e.target)) continue
     adj.set(e.source, [...(adj.get(e.source) ?? []), e.target])
     adj.set(e.target, [...(adj.get(e.target) ?? []), e.source])
   }
@@ -783,7 +804,7 @@ function buildGalaxy(input: GalaxyInput, index: number): Galaxy {
   const seen = new Set<string>()
   const lone: GraphNode[] = []
   for (const start of [...input.nodes].sort(important)) {
-    if (seen.has(start.id)) continue
+    if (seen.has(start.id) || inCon.has(start.id)) continue
     if (!(adj.get(start.id)?.length)) {
       seen.add(start.id)
       lone.push(start)
@@ -920,7 +941,7 @@ function buildGalaxy(input: GalaxyInput, index: number): Galaxy {
   }
 
   // How big the galaxy is: room for every system, plus the lone stars.
-  const area = g.systems.reduce((a, s) => a + Math.PI * (s.ext + 14) ** 2 * 2.4, 0) + lone.length * 140
+  const area = g.systems.reduce((a, s) => a + Math.PI * (s.ext + 14) ** 2 * 2.4, 0) + (lone.length + pagesOf.size * 3) * 140
   g.R = Math.max(70, Math.sqrt(area / Math.PI) + 30)
   const R = g.R
 
@@ -964,10 +985,16 @@ function buildGalaxy(input: GalaxyInput, index: number): Galaxy {
   g.R = farthest
 
   // Lone stars along the spiral arms, denser and thicker toward the core.
-  const n = lone.length
+  // (A note with pages takes a place among them: it and its pages are drawn as a constellation.)
+  let anchors: { nd: GraphNode; pages: GraphNode[] | null }[] = lone.map((nd) => ({ nd, pages: null }))
+  if (pagesOf.size) {
+    anchors = [...anchors, ...[...pagesOf.keys()].map((id) => ({ nd: byId.get(id)!, pages: pagesOf.get(id)! }))]
+    anchors.sort((a, b) => rng(a.nd.id + ':place')() - rng(b.nd.id + ':place')())
+  }
+  const n = anchors.length
   const scatter = clamp(1.5 - n / 70, 0.45, 1.5)
   const perArm = Math.max(1, Math.ceil(n / arms))
-  lone.forEach((nd, k) => {
+  anchors.forEach(({ nd, pages }, k) => {
     const s = make(nd, 'star')
     const arm = Math.floor(k / perArm)
     const t = ((k % perArm) + 0.5) / perArm
@@ -987,6 +1014,37 @@ function buildGalaxy(input: GalaxyInput, index: number): Galaxy {
       s.color = `hsla(${h}, ${f < 0.18 ? 85 : 78}%, ${f < 0.18 ? 84 : 76}%, 0.9)`
     }
     g.stars.push(s)
+    if (pages) {
+      // The note is the bright star; its pages follow a wandering line out from it, like the
+      // shape of a constellation.
+      const ch = th ?? hue + (rng(s.id + ':chue')() - 0.5) * 40
+      s.r = 1.2 + Math.sqrt(pages.length) * 0.18 + (s.pinned ? 0.4 : 0)
+      s.color = `hsla(${ch}, 92%, 82%, 0.95)`
+      const rc = rng(s.id + ':shape')
+      const stars: Body[] = [s]
+      const step0 = clamp(7 / Math.sqrt(Math.max(1, pages.length / 8)), 2.8, 7)
+      let heading = rc() * TAU
+      let [px, py, pz] = s.home
+      for (const pg of [...pages].sort((x, y) => x.title.localeCompare(y.title))) {
+        const p = make(pg, 'star')
+        heading += (rc() < 0.5 ? -1 : 1) * (0.5 + rc() * 0.7)
+        const step = step0 * (0.75 + rc() * 0.5)
+        px += Math.cos(heading) * step
+        pz += Math.sin(heading) * step
+        py += gauss(rc) * 0.9
+        p.home = [px, py, pz]
+        p.r = 0.95 + Math.sqrt(p.degree) * 0.2
+        p.color = `hsla(${ch + (rc() - 0.5) * 16}, 85%, 84%, 0.9)`
+        stars.push(p)
+        g.stars.push(p)
+      }
+      const lines: [Body, Body][] = []
+      for (let i = 1; i < stars.length; i++) lines.push([stars[i - 1], stars[i]])
+      if (stars.length >= 4) lines.push([stars[0], stars[Math.ceil(stars.length / 2)]])
+      const con: Constellation = { root: s, stars, lines, hue: ch }
+      for (const b of stars) b.con = con
+      g.cons.push(con)
+    }
   })
   g.bodies = [...g.systems.flatMap((s) => s.bodies), ...g.stars]
   return g
@@ -1234,6 +1292,7 @@ export function createSpace(el: HTMLCanvasElement, inputs: GalaxyInput[], onOpen
         if (a === hover) lit.add(b)
         if (b === hover) lit.add(a)
       }
+      for (const st of hover.con?.stars ?? []) lit.add(st)
     }
     const dimAll = !!hover || !!q_
 
@@ -1293,6 +1352,25 @@ export function createSpace(el: HTMLCanvasElement, inputs: GalaxyInput[], onOpen
           if (a !== hover && b !== hover) continue
           ctx.moveTo(a.sx, a.sy)
           ctx.lineTo(b.sx, b.sy)
+        }
+        ctx.stroke()
+      }
+    }
+
+    // Constellations: the lines between a note and its pages.
+    for (const g of galaxies) {
+      if (!g.shown || g.locked) continue
+      for (const c of g.cons) {
+        const active = hover?.con === c
+        const a = (dimAll ? (active ? 0.85 : 0.1) : 0.6) * clamp(fog(c.root.d) * 1.5, 0.45, 1)
+        if (a < 0.015) continue
+        ctx.strokeStyle = `hsla(${c.hue}, 85%, 84%, ${a})`
+        ctx.lineWidth = active ? 1.8 : 1.2
+        ctx.beginPath()
+        for (const [p, q] of c.lines) {
+          if (!p.shown || !q.shown) continue
+          ctx.moveTo(p.sx, p.sy)
+          ctx.lineTo(q.sx, q.sy)
         }
         ctx.stroke()
       }
@@ -1472,7 +1550,7 @@ export function createSpace(el: HTMLCanvasElement, inputs: GalaxyInput[], onOpen
       spacedText(ctx, g.name.toUpperCase(), g.sx, y, 2.4)
       ctx.font = '500 10px Inter, system-ui, sans-serif'
       ctx.fillStyle = 'rgba(200,196,235,0.7)'
-      const sub = g.locked ? 'Locked · encrypted' : g.encrypted ? 'Encrypted' : `${g.systems.length} ${g.systems.length === 1 ? 'system' : 'systems'} · ${g.stars.length} lone ${g.stars.length === 1 ? 'star' : 'stars'}`
+      const sub = g.locked ? 'Locked · encrypted' : g.encrypted ? 'Encrypted' : `${g.systems.length} ${g.systems.length === 1 ? 'system' : 'systems'} · ${g.stars.filter((x) => !x.con).length} lone ${g.stars.filter((x) => !x.con).length === 1 ? 'star' : 'stars'}${g.cons.length ? ` · ${g.cons.length} ${g.cons.length === 1 ? 'constellation' : 'constellations'}` : ''}`
       ctx.strokeText(sub, g.sx, y + 15)
       ctx.fillText(sub, g.sx, y + 15)
       ctx.font = '600 11px Inter, system-ui, sans-serif'
@@ -1492,6 +1570,29 @@ export function createSpace(el: HTMLCanvasElement, inputs: GalaxyInput[], onOpen
         if (!room(s.sx, y, ctx.measureText(text).width, 13, s === hoverSystem)) continue
         ctx.strokeText(text, s.sx, y)
         ctx.fillText(text, s.sx, y)
+      }
+    }
+    // Constellations, named after their note, once you're in their galaxy.
+    if (focus.kind !== 'all' || galaxies.length === 1) {
+      ctx.font = 'italic 600 11px Inter, system-ui, sans-serif'
+      for (const g of galaxies) {
+        if (!g.shown) continue
+        for (const c of g.cons) {
+          const on = c.stars.filter((b) => b.shown)
+          if (!on.length) continue
+          const span = Math.max(...on.map((b) => Math.hypot(b.sx - c.root.sx, b.sy - c.root.sy)))
+          if (span < 24 && hover?.con !== c) continue
+          const x = on.reduce((t, b) => t + b.sx, 0) / on.length
+          const y = Math.min(...on.map((b) => b.sy - b.px * 1.5)) - 12
+          const text = c.root.title.length > 40 ? c.root.title.slice(0, 39) + '…' : c.root.title
+          if (!room(x, y, ctx.measureText(text).width, 13, hover?.con === c)) continue
+          ctx.globalAlpha = (hover?.con === c ? 1 : 0.8) * fog(c.root.d)
+          ctx.lineWidth = 4
+          ctx.strokeStyle = 'rgba(3,2,10,0.85)'
+          ctx.fillStyle = `hsl(${c.hue} 80% 86%)`
+          ctx.strokeText(text, x, y)
+          ctx.fillText(text, x, y)
+        }
       }
     }
     // The planets of a system you are up close to (moons are named only when pointed at); hover and search results.
@@ -1517,7 +1618,11 @@ export function createSpace(el: HTMLCanvasElement, inputs: GalaxyInput[], onOpen
               ? `Planet of ${b.parent!.title}`
               : b.role === 'moon'
                 ? `Moon of ${b.parent!.title}`
-                : 'Lone star · not linked yet'
+                : b.con
+                  ? b === b.con.root
+                    ? `Constellation · ${b.con.stars.length - 1} ${b.con.stars.length === 2 ? 'page' : 'pages'}`
+                    : `Page of ${b.con.root.title}`
+                  : 'Lone star · not linked yet'
         ctx.font = '500 10px Inter, system-ui, sans-serif'
         ctx.fillStyle = 'rgba(200,196,235,0.75)'
         ctx.strokeText(what, b.sx, y - 14)

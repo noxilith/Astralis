@@ -331,3 +331,64 @@ impl DriveFiles for GoogleDrive {
         Ok(())
     }
 }
+
+/// Everything cloud vaults need from a drive beyond plain files: folders with private properties,
+/// and sharing. Implemented by [`GoogleDrive`], [`crate::onedrive::OneDrive`] and, in tests, an
+/// in-memory drive.
+pub trait CloudDrive: DriveFiles {
+    /// What a cloud vault records as its provider (see `astralis_core::cloud`).
+    fn provider(&self) -> &'static str;
+    /// The drive's name for people ("Google Drive").
+    fn label(&self) -> &'static str;
+    /// The signed-in account's email.
+    fn email(&self) -> impl Future<Output = Result<String>> + Send;
+    /// The "Astralis" folder at the top of the drive (created if needed); never shared.
+    fn root_folder(&self) -> impl Future<Output = Result<String>> + Send;
+    fn create_folder(&self, name: &str, parent: &str, props: &BTreeMap<String, String>) -> impl Future<Output = Result<String>> + Send;
+    fn folder(&self, id: &str) -> impl Future<Output = Result<FolderInfo>> + Send;
+    fn subfolders(&self, parent: &str) -> impl Future<Output = Result<Vec<FolderInfo>>> + Send;
+    /// Sets (or with `None`, removes) private properties on a folder.
+    fn set_props(&self, id: &str, props: &BTreeMap<String, Option<String>>) -> impl Future<Output = Result<()>> + Send;
+    /// Gives someone edit access to a folder; the drive emails them.
+    fn share_with(&self, id: &str, email: &str, message: &str) -> impl Future<Output = Result<()>> + Send;
+    /// Removes someone's access to a folder (no error if they had none).
+    fn unshare_with(&self, id: &str, email: &str) -> impl Future<Output = Result<()>> + Send;
+    /// Folders other people shared with this account that look like Astralis vaults, for drives
+    /// that can list them (Google uses its folder picker instead).
+    fn shared_folders(&self) -> impl Future<Output = Result<Vec<FolderInfo>>> + Send {
+        async { Ok(Vec::new()) }
+    }
+}
+
+impl CloudDrive for GoogleDrive {
+    fn provider(&self) -> &'static str {
+        astralis_core::cloud::GOOGLE_DRIVE
+    }
+    fn label(&self) -> &'static str {
+        "Google Drive"
+    }
+    async fn email(&self) -> Result<String> {
+        GoogleDrive::email(self).await
+    }
+    async fn root_folder(&self) -> Result<String> {
+        GoogleDrive::root_folder(self).await
+    }
+    async fn create_folder(&self, name: &str, parent: &str, props: &BTreeMap<String, String>) -> Result<String> {
+        GoogleDrive::create_folder(self, name, parent, props).await
+    }
+    async fn folder(&self, id: &str) -> Result<FolderInfo> {
+        GoogleDrive::folder(self, id).await
+    }
+    async fn subfolders(&self, parent: &str) -> Result<Vec<FolderInfo>> {
+        GoogleDrive::subfolders(self, parent).await
+    }
+    async fn set_props(&self, id: &str, props: &BTreeMap<String, Option<String>>) -> Result<()> {
+        GoogleDrive::set_props(self, id, props).await
+    }
+    async fn share_with(&self, id: &str, email: &str, message: &str) -> Result<()> {
+        GoogleDrive::share_with(self, id, email, message).await
+    }
+    async fn unshare_with(&self, id: &str, email: &str) -> Result<()> {
+        GoogleDrive::unshare_with(self, id, email).await
+    }
+}

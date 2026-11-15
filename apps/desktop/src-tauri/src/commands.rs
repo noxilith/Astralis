@@ -66,6 +66,8 @@ macro_rules! slow_store_cmd {
 store_cmd!(create_note(input: NewNote) -> Note => |s| s.create_note(input));
 store_cmd!(quick_capture(vault_id: Option<Uuid>, text: String) -> Note => |s| s.quick_capture(vault_id, &text));
 store_cmd!(get_note(id: Uuid) -> Note => |s| s.get_note(id));
+store_cmd!(list_pages(id: Uuid) -> Vec<Note> => |s| s.list_pages(id));
+store_cmd!(set_note_parent(id: Uuid, parent: Option<Uuid>) -> Note => |s| s.set_note_parent(id, parent));
 store_cmd!(update_note(id: Uuid, patch: NotePatch) -> Note => |s| s.update_note(id, patch));
 store_cmd!(list_notes(filter: ListFilter) -> Vec<Note> => |s| s.list_notes(&filter));
 store_cmd!(set_pinned(id: Uuid, pinned: bool) -> Note => |s| s.set_pinned(id, pinned));
@@ -293,6 +295,8 @@ pub async fn tidy_note(state: S<'_>, text: String, fix_spelling: bool) -> Result
 pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         create_note,
+        list_pages,
+        set_note_parent,
         quick_capture,
         get_note,
         update_note,
@@ -369,6 +373,12 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         crate::cloud::cloud_invite,
         crate::cloud::cloud_uninvite,
         crate::cloud::cloud_join,
+        crate::cloud::cloud_join_onedrive,
+        crate::cloud::cloud_shared_vaults,
+        crate::cloud::onedrive_status,
+        crate::cloud::onedrive_set_client,
+        crate::cloud::onedrive_connect,
+        crate::cloud::onedrive_disconnect,
         crate::cloud::cloud_sync_now,
         crate::cloud::cloud_my_vaults,
         crate::cloud::cloud_add_mine,
@@ -406,6 +416,8 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static 
         crate::brain_cmds::brain_install_skill,
         crate::brain_cmds::brain_skill_text,
         move_note_to_vault,
+        autostart_get,
+        autostart_set,
         get_setting,
         set_setting,
         check_grammar,
@@ -546,4 +558,34 @@ pub fn live_scene(state: S<'_>, note_id: Uuid, elements: String) -> Result<()> {
         net.broadcast(astralis_net::Live::Scene { note_id: note_id.to_string(), elements });
     }
     Ok(())
+}
+
+// ---- launch at login ----
+#[tauri::command]
+pub fn autostart_get(app: tauri::AppHandle) -> bool {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        return app.autolaunch().is_enabled().unwrap_or(false);
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = app;
+        false
+    }
+}
+
+#[tauri::command]
+pub fn autostart_set(app: tauri::AppHandle, enabled: bool) -> std::result::Result<(), String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        let l = app.autolaunch();
+        return (if enabled { l.enable() } else { l.disable() }).map_err(|e| e.to_string());
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = (app, enabled);
+        Ok(())
+    }
 }

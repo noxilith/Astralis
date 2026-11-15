@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { ArrowUpRight, CheckCircle2, Circle, Link2, Tag, X } from 'lucide-react'
 import { api, type Backlink, type Note, type OutgoingLink, type Task } from '../api'
 import { useApp } from '../context'
+import { PagesPanel } from './PagesPanel'
 
 /** Side panel for a note: tags, links, backlinks and linked tasks. (AI tools live in the ✨ AI menu.) */
 export function NotePanel({
@@ -156,6 +157,12 @@ export function NotePanel({
           />
         )}
       </div>
+
+      {!note.encrypted && (
+        <div className="panel-section">
+          <PagesPanel note={note} readOnly={readOnly} onChange={onChange} />
+        </div>
+      )}
     </div>
   )
 }

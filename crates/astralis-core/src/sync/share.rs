@@ -348,6 +348,8 @@ impl Store {
             archive: crate::notes::ArchiveFilter::All,
             ..Default::default()
         })?;
+        let mut note_map: HashMap<Uuid, Uuid> = HashMap::new();
+        let mut page_links: Vec<(Uuid, Uuid)> = Vec::new();
         for n in notes {
             let mut body = n.body.clone();
             for att in crate::attachments::attachment_ids_in(&n.body) {
@@ -365,7 +367,12 @@ impl Store {
                 pinned: n.pinned,
                 vault_id: Some(new),
                 folder_id: n.folder_id.and_then(|f| folder_map.get(&f).copied()),
+                parent_id: None,
             })?;
+            note_map.insert(n.id, created.id);
+            if let Some(p) = n.parent_id {
+                page_links.push((n.id, p));
+            }
             if n.archived_at.is_some() {
                 self.archive_note(created.id)?;
             }
@@ -373,6 +380,11 @@ impl Store {
                 "UPDATE tasks SET note_id = ?2 WHERE note_id = ?1",
                 params![n.id.as_bytes(), created.id.as_bytes()],
             )?;
+        }
+        for (page, parent) in page_links {
+            if let (Some(&p), Some(&q)) = (note_map.get(&page), note_map.get(&parent)) {
+                self.set_note_parent(p, Some(q))?;
+            }
         }
         if self.get_setting("auto_vault")?.as_deref() == Some(old.to_string().as_str()) {
             self.set_setting("auto_vault", &new.to_string())?;

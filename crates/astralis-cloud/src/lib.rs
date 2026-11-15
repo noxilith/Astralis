@@ -10,8 +10,11 @@
 //! invited email. Someone invited picks the folder in the Google Picker, reads their secret, and
 //! presents it to the owner's device over P2P to join (see `astralis-net`).
 
+pub mod any;
 pub mod drive;
+pub mod ms_oauth;
 pub mod oauth;
+pub mod onedrive;
 pub mod sync;
 
 /// The HTTP client used for Google (re-exported so the app uses the same version).
@@ -20,13 +23,13 @@ pub use reqwest;
 use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow, bail};
-use astralis_core::cloud::{CloudVault, GOOGLE_DRIVE};
+use astralis_core::cloud::CloudVault;
 use astralis_core::vault::Vault;
 use base64::Engine;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use drive::GoogleDrive;
+use drive::CloudDrive;
 pub use sync::{StoreHandle, SyncReport, sync_vault};
 
 /// Folder properties (private to Astralis).
@@ -48,7 +51,7 @@ fn secret() -> Result<String> {
 
 /// Creates a vault backed by a new `Astralis/<name>/` folder in the user's Drive.
 pub async fn create_cloud_vault(
-    drive: &GoogleDrive,
+    drive: &impl CloudDrive,
     store: &StoreHandle,
     name: &str,
     device: &str,
@@ -69,7 +72,7 @@ pub async fn create_cloud_vault(
 
 /// Puts an existing (plain) vault on the Drive: makes its `Astralis/<name>/` folder and a fresh
 /// sync key. Used for new cloud vaults and for turning the Brain into a cloud vault.
-pub async fn make_cloud(drive: &GoogleDrive, store: &StoreHandle, vault: Uuid, name: &str, device: &str, device_name: &str) -> Result<()> {
+pub async fn make_cloud(drive: &impl CloudDrive, store: &StoreHandle, vault: Uuid, name: &str, device: &str, device_name: &str) -> Result<()> {
     {
         let s = store.lock().unwrap();
         if s.cloud_vault(vault).map_err(|e| anyhow!("{e}"))?.is_some() {
@@ -94,7 +97,7 @@ pub async fn make_cloud(drive: &GoogleDrive, store: &StoreHandle, vault: Uuid, n
         .unwrap()
         .set_cloud_vault(&CloudVault {
             vault_id: vault,
-            provider: GOOGLE_DRIVE.into(),
+            provider: drive.provider().into(),
             folder_id: folder,
             sync_key: key.to_vec(),
             owned: true,
@@ -108,7 +111,7 @@ pub async fn make_cloud(drive: &GoogleDrive, store: &StoreHandle, vault: Uuid, n
 
 /// Invites someone by email: shares the folder with them (Google emails them) and leaves a
 /// one-time secret their app uses to join.
-pub async fn invite(drive: &GoogleDrive, store: &StoreHandle, vault: Uuid, email: &str, from: &str) -> Result<()> {
+pub async fn invite(drive: &impl CloudDrive, store: &StoreHandle, vault: Uuid, email: &str, from: &str) -> Result<()> {
     let email = email.trim().to_ascii_lowercase();
     if !email.contains('@') || email.len() > 254 {
         bail!("that doesn't look like an email address");
@@ -118,9 +121,10 @@ pub async fn invite(drive: &GoogleDrive, store: &StoreHandle, vault: Uuid, email
     drive
         .set_props(&cv.folder_id, &BTreeMap::from([(invite_prop(&email), Some(secret.clone()))]))
         .await?;
+    let label = drive.label();
     let note = format!(
         "{from} shared an Astralis vault with you. Open Astralis, then in the vault menu choose \
-         \u{201c}Join shared vault from Google Drive\u{2026}\u{201d} and pick this folder."
+         \u{201c}Join shared vault from {label}\u{2026}\u{201d} and choose this vault."
     );
     drive.share_with(&cv.folder_id, &email, &note).await?;
     store.lock().unwrap().add_cloud_invite(vault, &email, &secret).map_err(|e| anyhow!("{e}"))?;
@@ -129,7 +133,7 @@ pub async fn invite(drive: &GoogleDrive, store: &StoreHandle, vault: Uuid, email
 
 /// Takes someone out: removes their Drive access and invite. Returns the device that had
 /// joined with it (the caller stops sharing with that device so its copy is removed).
-pub async fn uninvite(drive: &GoogleDrive, store: &StoreHandle, vault: Uuid, email: &str) -> Result<Option<String>> {
+pub async fn uninvite(drive: &impl CloudDrive, store: &StoreHandle, vault: Uuid, email: &str) -> Result<Option<String>> {
     let cv = owned_cloud_vault(store, vault)?;
     drive.unshare_with(&cv.folder_id, email).await?;
     drive.set_props(&cv.folder_id, &BTreeMap::from([(invite_prop(email), None)])).await?;
@@ -161,7 +165,7 @@ fn key_prop(vault: Uuid) -> String {
 
 /// Puts the vault's key on the Drive for this account's other devices (once per device and vault).
 /// The files in the folder stay sealed with it; a stranger with only the files can't read them.
-pub async fn ensure_key_on_drive(drive: &GoogleDrive, store: &StoreHandle, vault: Uuid) -> Result<()> {
+pub async fn ensure_key_on_drive(drive: &impl CloudDrive, store: &StoreHandle, vault: Uuid) -> Result<()> {
     let flag = format!("cloud.keyput.{vault}");
     let cv = owned_cloud_vault(store, vault)?;
     if store.lock().unwrap().get_setting(&flag).map_err(|e| anyhow!("{e}"))?.is_some_and(|v| v == "1") {
@@ -186,7 +190,7 @@ pub struct MyVault {
 }
 
 /// The vaults in `Astralis/` on this Google account's Drive, made by this app on any device.
-pub async fn my_cloud_vaults(drive: &GoogleDrive) -> Result<Vec<MyVault>> {
+pub async fn my_cloud_vaults(drive: &impl CloudDrive) -> Result<Vec<MyVault>> {
     let root = drive.root_folder().await?;
     let root_props = drive.folder(&root).await?.props;
     let mut out = Vec::new();
@@ -210,7 +214,7 @@ pub async fn my_cloud_vaults(drive: &GoogleDrive) -> Result<Vec<MyVault>> {
 /// Adds one of this account's cloud vaults to this device, from the Drive alone: the key is read
 /// from the (never shared) Astralis folder; the notes come with the next sync. Returns the vault
 /// and its name.
-pub async fn add_my_cloud_vault(drive: &GoogleDrive, store: &StoreHandle, folder_id: &str) -> Result<(Uuid, String)> {
+pub async fn add_my_cloud_vault(drive: &impl CloudDrive, store: &StoreHandle, folder_id: &str) -> Result<(Uuid, String)> {
     let f = drive.folder(folder_id).await?;
     if f.props.get(PROP_KIND).map(String::as_str) != Some("vault") {
         bail!("“{}” isn't an Astralis vault folder", f.name);
@@ -232,7 +236,7 @@ pub async fn add_my_cloud_vault(drive: &GoogleDrive, store: &StoreHandle, folder
         .unwrap()
         .set_cloud_vault(&CloudVault {
             vault_id: vault,
-            provider: GOOGLE_DRIVE.into(),
+            provider: drive.provider().into(),
             folder_id: f.id,
             sync_key: key,
             owned: true,
@@ -257,7 +261,7 @@ pub struct JoinTicket {
 }
 
 /// Reads the invite for `email` from a picked folder.
-pub async fn join_ticket(drive: &GoogleDrive, folder_id: &str, email: &str) -> Result<JoinTicket> {
+pub async fn join_ticket(drive: &impl CloudDrive, folder_id: &str, email: &str) -> Result<JoinTicket> {
     let f = drive.folder(folder_id).await?;
     if f.props.get(PROP_KIND).map(String::as_str) != Some("vault") {
         bail!("“{}” isn't an Astralis vault folder", f.name);

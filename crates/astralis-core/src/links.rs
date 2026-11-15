@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::error::Result;
 use crate::notes::{NoteKind, NoteRef};
 use crate::store::Store;
-use crate::util::uuid_col;
+use crate::util::{opt_uuid_col, uuid_col};
 
 /// A parsed `[[target|alias]]` occurrence. Offsets are byte offsets of the whole `[[...]]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +81,8 @@ pub struct GraphNode {
     pub tags: Vec<String>,
     pub degree: usize,
     pub pinned: bool,
+    /// The note this one is a page of.
+    pub parent_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -281,7 +283,7 @@ impl Store {
             let mut stmt = self.conn.prepare(
                 "SELECT id, title, pinned,
                     (SELECT group_concat(t.name, char(31)) FROM note_tags nt JOIN tags t ON t.id = nt.tag_id
-                     WHERE nt.note_id = notes.id), kind
+                     WHERE nt.note_id = notes.id), kind, parent_id
                  FROM notes WHERE vault_id = ?1 AND cipher IS NULL AND archived_at IS NULL",
             )?;
             stmt.query_map([vault.as_bytes()], |r| {
@@ -296,6 +298,7 @@ impl Store {
                         .map(|t| t.split('\u{1f}').map(str::to_owned).collect())
                         .unwrap_or_default(),
                     degree: 0,
+                    parent_id: opt_uuid_col(r, 5)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?
@@ -324,7 +327,9 @@ impl Store {
             n.degree = degree.get(&n.id).copied().unwrap_or(0);
         }
         if !include_orphans {
-            nodes.retain(|n| n.degree > 0);
+            // A note with pages (or a page) is part of a constellation, linked or not.
+            let parents: HashSet<Uuid> = nodes.iter().filter_map(|n| n.parent_id).collect();
+            nodes.retain(|n| n.degree > 0 || n.parent_id.is_some() || parents.contains(&n.id));
         }
         let mut edges: Vec<GraphEdge> = edges.into_iter().collect();
         edges.sort_by_key(|e| (e.source, e.target));

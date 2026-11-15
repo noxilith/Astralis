@@ -184,6 +184,8 @@ conventions, gotchas, a map of the code) plus a section about you.
   with you peer-to-peer while you're both online. Files on Drive are encrypted, and
   the app can only see the files it created. See
   [docs/google-drive-setup.md](docs/google-drive-setup.md) to build with your own Google client.
+- **OneDrive**: the same, on Microsoft OneDrive (including sharing by email). It needs a free
+  Microsoft app registration; see [docs/onedrive-setup.md](docs/onedrive-setup.md).
 
 Under the hood, changes carry hybrid logical clocks and apply in any order; note text merges
 as a CRDT, so two people editing at once both keep their changes.
@@ -273,7 +275,7 @@ flowchart LR
 
 ## 🧭 Planned
 
-An iOS app, more cloud drives (OneDrive, Dropbox, Box, pCloud), biometric unlock, voice-to-text, and a
+An iOS app, more cloud drives (Dropbox, Box, pCloud), biometric unlock, voice-to-text, and a
 fine-tuned Astralis model.
 
 ---

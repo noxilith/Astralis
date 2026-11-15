@@ -49,5 +49,11 @@ fn main() {
         println!("cargo:rustc-env=ASTRALIS_BUILTIN_GOOGLE_CLIENT_ID={id}");
         println!("cargo:rustc-env=ASTRALIS_BUILTIN_GOOGLE_CLIENT_SECRET={secret}");
     }
+    println!("cargo:rerun-if-env-changed=ASTRALIS_ONEDRIVE_CLIENT_ID");
+    if let Ok(id) = std::env::var("ASTRALIS_ONEDRIVE_CLIENT_ID")
+        && !id.trim().is_empty()
+    {
+        println!("cargo:rustc-env=ASTRALIS_BUILTIN_ONEDRIVE_CLIENT_ID={}", id.trim());
+    }
     tauri_build::build()
 }

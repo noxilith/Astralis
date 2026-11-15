@@ -59,11 +59,11 @@ pub struct SignIn {
     pub picked: Vec<String>,
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-fn random_token() -> Result<String> {
+pub(crate) fn random_token() -> Result<String> {
     let bytes = astralis_core::vault::random::<32>().map_err(|e| anyhow!("{e}"))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
@@ -125,7 +125,7 @@ pub async fn sign_in(
 }
 
 /// Waits for Google's redirect and answers it with a small "you can close this" page.
-async fn catch_redirect(listener: &TcpListener) -> Result<Vec<(String, String)>> {
+pub(crate) async fn catch_redirect(listener: &TcpListener) -> Result<Vec<(String, String)>> {
     loop {
         let (mut sock, _) = listener.accept().await?;
         let mut buf = vec![0u8; 16 * 1024];

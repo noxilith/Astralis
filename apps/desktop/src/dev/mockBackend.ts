@@ -16,10 +16,10 @@ function bigGraph(total: number, includeOrphans: boolean) {
   const lone = new URLSearchParams(location.search).get('lone') === '1'
   let seed = 12345
   const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296)
-  const nodes: { id: string; kind: 'note'; title: string; tags: string[]; pinned: boolean; degree: number }[] = []
+  const nodes: { id: string; kind: 'note'; title: string; tags: string[]; pinned: boolean; degree: number; parentId: string | null }[] = []
   const edges: { source: string; target: string }[] = []
   const mk = (i: number) => {
-    const n = { id: `big-${i}`, kind: 'note' as const, title: `Note ${i}`, tags: [], pinned: false, degree: 0 }
+    const n = { id: `big-${i}`, kind: 'note' as const, title: `Note ${i}`, tags: [], pinned: false, degree: 0, parentId: null }
     nodes.push(n)
     return n
   }
@@ -65,6 +65,7 @@ let hooksStop = false
 let agentsAccess = 'edit'
 const mockMe = { name: "noxilith", color: "#8b7bff" }
 const google: { clientId: string | null; email: string | null } = { clientId: null, email: null }
+const onedrive: { clientId: string | null; email: string | null } = { clientId: null, email: null }
 const invites = new Map<string, { email: string; acceptedBy: string | null }[]>()
 const granted = new Set<string>()
 const mem = (folder: string, project: string, kind: string, hook: string, source: string, isNew: boolean, recallCount = 0, daysAgo = 1) => ({
@@ -113,12 +114,12 @@ const docFor = (noteId: string) => {
 
 const vaultOf = (v?: string | null) => v ?? vaults[0].id
 const note = (
-  title: string, body: string, tags: string[] = [], pinned = false, kind: NoteKind = 'note', vaultId?: string | null, folderId: string | null = null,
+  title: string, body: string, tags: string[] = [], pinned = false, kind: NoteKind = 'note', vaultId?: string | null, folderId: string | null = null, parentId: string | null = null,
 ): Note => {
   const v = vaults.find((x) => x.id === vaultOf(vaultId))!
   const n: Note = {
     id: id(), kind, title, body: kind === 'whiteboard' && !body ? '{}' : body, tags, pinned,
-    createdAt: now(), updatedAt: now(), archivedAt: null, vaultId: v.id, folderId, encrypted: v.encrypted,
+    createdAt: now(), updatedAt: now(), archivedAt: null, vaultId: v.id, folderId, parentId, encrypted: v.encrypted,
   }
   notes.unshift(n)
   return n
@@ -136,6 +137,8 @@ note('Project Apollo', 'Goals for the launch. See [[Ideas]].\n\n- [ ] Draft plan
 note('Standup notes', 'Daily standup.', [], false, 'note', null, work.id)
 note('Ideas', 'A place for loose ideas.', ['personal'])
 note('Brainstorm', '', [], false, 'whiteboard', null, projects.id)
+const handbook = note('Team handbook', 'How we work.', ['work'])
+for (const t of ['Onboarding', 'Meetings', 'Tools', 'Release checklist']) note(t, 'Details for ' + t + '.', [], false, 'note', null, null, handbook.id)
 
 const find = <T extends { id: string }>(list: T[], key: string) => {
   const x = list.find((i) => i.id === key)
@@ -149,7 +152,7 @@ const ref = (n: Note) => ({ id: n.id, title: n.title })
 
 const handlers: Record<string, (a: Args) => unknown> = {
   create_note: ({ input }) =>
-    note(input.title ?? '', input.body ?? '', input.tags ?? [], input.pinned ?? false, input.kind ?? 'note', input.vaultId, input.folderId ?? null),
+    note(input.title ?? '', input.body ?? '', input.tags ?? [], input.pinned ?? false, input.kind ?? 'note', input.vaultId, input.folderId ?? null, input.parentId ?? null),
   list_folders: ({ vaultId }) => folders.filter((f) => f.vaultId === vaultOf(vaultId)).sort((a, b) => a.name.localeCompare(b.name)),
   create_folder: ({ vaultId, parentId, name }) => folder(name, parentId, vaultId),
   rename_folder: ({ id: k, name }) => Object.assign(find(folders, k), { name }),
@@ -163,6 +166,8 @@ const handlers: Record<string, (a: Args) => unknown> = {
     folders.forEach((c) => c.parentId === k && (c.parentId = f.parentId))
     folders.splice(folders.indexOf(f), 1)
   },
+  list_pages: ({ id }) => notes.filter((n) => n.parentId === id && !n.archivedAt).reverse(),
+  set_note_parent: ({ id, parent }) => Object.assign(find(notes, id), { parentId: parent }),
   move_note_to_folder: ({ noteId, folderId }) => Object.assign(find(notes, noteId), { folderId }),
   create_whiteboard: ({ vaultId, title }) => note(title || 'Untitled whiteboard', '{}', [], false, 'whiteboard', vaultId),
   save_whiteboard: ({ id: k, scene }) => void Object.assign(find(notes, k), { body: scene, updatedAt: now() }),
@@ -216,18 +221,19 @@ const handlers: Record<string, (a: Args) => unknown> = {
     const edges = active.flatMap((s) =>
       links(s.body).flatMap((l) => active.filter((t) => t.title.toLowerCase() === l.toLowerCase()).map((t) => ({ source: s.id, target: t.id }))),
     )
-    const nodes = active.map((n) => ({ id: n.id, kind: n.kind, title: n.title, tags: n.tags, pinned: n.pinned, degree: edges.filter((e) => e.source === n.id || e.target === n.id).length }))
+    const nodes = active.map((n) => ({ id: n.id, kind: n.kind, title: n.title, tags: n.tags, pinned: n.pinned, parentId: n.parentId ?? null, degree: edges.filter((e) => e.source === n.id || e.target === n.id).length }))
     // `?planets=8` in the address adds that many linked notes to the first one (to look at a busy system).
     const extra = Number(new URLSearchParams(location.search).get('planets')) || 0
     if (extra && nodes[0]) {
       for (let i = 0; i < extra; i++) {
         const fid = `fake-planet-${i}`
-        nodes.push({ id: fid, kind: 'note', title: `Planet ${i + 1}`, tags: [], pinned: false, degree: 1 })
+        nodes.push({ id: fid, kind: 'note', title: `Planet ${i + 1}`, tags: [], pinned: false, degree: 1, parentId: null })
         edges.push({ source: nodes[0].id, target: fid })
       }
       nodes[0].degree += extra
     }
-    return { nodes: includeOrphans ? nodes : nodes.filter((n) => n.degree > 0), edges }
+    const parents = new Set(nodes.map((n) => n.parentId))
+    return { nodes: includeOrphans ? nodes : nodes.filter((n) => n.degree > 0 || n.parentId || parents.has(n.id)), edges }
   },
   note_history: () => [],
   list_templates: () => templates,
@@ -307,6 +313,8 @@ const handlers: Record<string, (a: Args) => unknown> = {
   ],
   get_setting: ({ key }) => settings.get(key) ?? null,
   set_setting: ({ key, value }) => void settings.set(key, value),
+  autostart_get: () => false,
+  autostart_set: () => undefined,
   // Flags "universe" and "stays" so the right-click menu can be tried.
   check_grammar: ({ text }) => [...text.matchAll(/universe|stays/g)].map((m) => ({ start: m.index!, end: m.index! + m[0].length, message: 'Possible spelling mistake', kind: 'spelling', fixes: [{ kind: 'replace', text: 'Universe' }] })),
   brain_status: () => ({ loaded: false, model: 'mock', neural: false, indexed: notes.length, pending: 0 }),
@@ -332,6 +340,12 @@ const handlers: Record<string, (a: Args) => unknown> = {
   google_set_client: ({ clientId }) => void (google.clientId = clientId),
   google_connect: () => (google.email = 'you@gmail.com'),
   google_disconnect: () => void (google.email = null),
+  onedrive_status: () => ({ configured: !!onedrive.clientId, builtin: false, clientId: onedrive.clientId, email: onedrive.email }),
+  onedrive_set_client: ({ clientId }) => void (onedrive.clientId = clientId),
+  onedrive_connect: () => (onedrive.email = 'you.com'),
+  onedrive_disconnect: () => void (onedrive.email = null),
+  cloud_shared_vaults: () => [{ folderId: 'od1', name: 'Family trip', ownerName: 'Sam\'s laptop' }],
+  cloud_join_onedrive: () => 'Family trip',
   cloud_create_vault: ({ name }) => {
     const v: Vault = { id: id(), name, createdAt: now(), encrypted: false, unlocked: true, noteCount: 0, owner: null, sharedWith: [], cloud: 'google-drive' }
     vaults.push(v)

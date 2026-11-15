@@ -212,6 +212,7 @@ a { color: var(--accent-strong); }
 .panel-section h3 .spacer { flex: 1; }
 .link-row { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: var(--radius-sm); cursor: pointer; }
 .link-row:hover { background: var(--bg-hover); }
+.link-row.active { background: var(--bg-hover); font-weight: 600; cursor: default; }
 .link-row .ctx { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .score { font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 .summary { font-size: 13px; color: var(--text-muted); background: var(--bg-elev-2); border-radius: var(--radius-sm); padding: 10px; }
@@ -994,3 +995,32 @@ html.android .m-tabs { background: var(--bg); }
 /* Android's status bar is already tall on phones with a camera cutout: no extra space above the header. */
 html.android .m-list-head { padding-top: 0; }
 html.android .m-bar { padding-top: 0; }
+
+/* Pages tab */
+.pages-panel { padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.pages-head h3 { margin: 0; }
+.pages-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pages-title { font-size: 15px; font-weight: 650; }
+.pages-new .input { width: 100%; }
+.pages-search { display: flex; align-items: center; gap: 6px; padding: 0 8px; height: 30px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-faint); }
+.pages-search input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 12.5px; }
+.pages-list { display: flex; flex-direction: column; gap: 2px; }
+.pages-children { margin-left: 13px; padding-left: 8px; border-left: 1px solid var(--border); display: flex; flex-direction: column; gap: 2px; }
+.page-row { position: relative; display: flex; align-items: center; border-radius: var(--radius-sm); }
+.page-row:hover { background: var(--bg-hover); }
+.page-row.active { background: var(--accent-soft); }
+.page-row.active .page-title { font-weight: 600; }
+.page-row.active svg { color: var(--accent-strong); }
+.page-row.root .page-title { font-weight: 600; }
+.page-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 0; background: transparent; color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.page-row.active .page-main { cursor: default; }
+.page-main svg { flex: none; color: var(--text-faint); }
+.page-title { flex: 1; min-width: 0; }
+.page-time { flex: none; font-size: 11px; color: var(--text-faint); }
+.page-rename { flex: 1; min-width: 0; padding: 1px 6px; font-size: 13px; }
+.page-actions { display: none; flex: none; gap: 0; padding-right: 4px; }
+.page-row:hover .page-actions, .page-row:focus-within .page-actions { display: inline-flex; }
+.page-row:hover .page-time, .page-row:focus-within .page-time { display: none; }
+.page-actions .icon-btn { width: 24px; height: 24px; }
+.pages-empty { margin: 0; padding: 10px 12px; border: 1px dashed var(--border); border-radius: var(--radius-sm); }
+.pages-nav { display: flex; justify-content: space-between; gap: 8px; margin-top: 4px; }

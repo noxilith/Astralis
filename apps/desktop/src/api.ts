@@ -18,12 +18,13 @@ export interface Note {
   vaultId: Id
   /** Folder within the vault; null = vault root. */
   folderId: Id | null
+  parentId: Id | null
   /** The note's vault is encrypted. */
   encrypted: boolean
   tags: string[]
 }
 export interface NoteRef { id: Id; title: string }
-export interface NewNote { kind?: NoteKind; title?: string; body?: string; tags?: string[]; pinned?: boolean; vaultId?: Id | null; folderId?: Id | null }
+export interface NewNote { kind?: NoteKind; title?: string; body?: string; tags?: string[]; pinned?: boolean; vaultId?: Id | null; folderId?: Id | null; parentId?: Id | null }
 export interface Folder { id: Id; vaultId: Id; parentId: Id | null; name: string; createdAt: Ms }
 export interface NotePatch { title?: string; body?: string }
 export type ArchiveFilter = 'active' | 'archived' | 'all'
@@ -32,7 +33,7 @@ export interface TagCount { name: string; count: number }
 export interface SearchHit { id: Id; kind: NoteKind; title: string; snippet: string; archived: boolean; updatedAt: Ms; score: number }
 export interface Backlink { note: NoteRef; context: string }
 export interface OutgoingLink { title: string; notes: NoteRef[] }
-export interface GraphNode { id: Id; kind: NoteKind; title: string; tags: string[]; degree: number; pinned: boolean }
+export interface GraphNode { id: Id; kind: NoteKind; title: string; tags: string[]; degree: number; pinned: boolean; parentId: Id | null }
 export interface Graph { nodes: GraphNode[]; edges: { source: Id; target: Id }[] }
 export interface NoteVersion { id: Id; noteId: Id; title: string; body: string; createdAt: Ms }
 export interface Template { id: Id; name: string; title: string; body: string; builtin: boolean; createdAt: Ms; updatedAt: Ms }
@@ -164,6 +165,10 @@ export type AssistantOutput = 'rewrite' | 'insert' | 'answer'
 export interface AssistantAction { id: string; label: string; hint: string; group: string; output: AssistantOutput }
 export interface AssistantStatus { ready: boolean; downloading: boolean; loaded: boolean; actions: AssistantAction[] }
 export interface GoogleStatus { configured: boolean; builtin: boolean; clientId: string | null; email: string | null }
+export interface OneDriveStatus { configured: boolean; builtin: boolean; clientId: string | null; email: string | null }
+export type CloudProvider = 'google-drive' | 'onedrive'
+/** A vault someone shared on OneDrive. */
+export interface SharedVault { folderId: string; name: string; ownerName: string }
 export interface CloudInvite { email: string; acceptedBy: string | null }
 /** A cloud vault in the user's own Drive (made on any of their devices). */
 export interface MyCloudVault { folderId: string; vaultId: Id; name: string; ownerName: string; onThisDevice: boolean; ready: boolean }
@@ -187,6 +192,8 @@ export const api = {
   createNote: (input: NewNote) => call<Note>('create_note', { input }),
   quickCapture: (vaultId: Id | null, text: string) => call<Note>('quick_capture', { vaultId, text }),
   getNote: (id: Id) => call<Note>('get_note', { id }),
+  listPages: (id: Id) => call<Note[]>('list_pages', { id }),
+  setNoteParent: (id: Id, parent: Id | null) => call<Note>('set_note_parent', { id, parent }),
   updateNote: (id: Id, patch: NotePatch) => call<Note>('update_note', { id, patch }),
   listNotes: (filter: ListFilter = {}) => call<Note[]>('list_notes', { filter }),
   setPinned: (id: Id, pinned: boolean) => call<Note>('set_pinned', { id, pinned }),
@@ -282,16 +289,23 @@ export const api = {
   googleSetClient: (clientId: string, clientSecret: string) => call<void>('google_set_client', { clientId, clientSecret }),
   googleConnect: () => call<string>('google_connect'),
   googleDisconnect: () => call<void>('google_disconnect'),
-  createCloudVault: (name: string) => call<Vault>('cloud_create_vault', { name }),
+  onedriveStatus: () => call<OneDriveStatus>('onedrive_status'),
+  onedriveSetClient: (clientId: string) => call<void>('onedrive_set_client', { clientId }),
+  onedriveConnect: () => call<string>('onedrive_connect'),
+  onedriveDisconnect: () => call<void>('onedrive_disconnect'),
+  createCloudVault: (name: string, provider?: CloudProvider) => call<Vault>('cloud_create_vault', { name, provider }),
+  /** The Astralis vaults other people shared with this OneDrive account. */
+  cloudSharedVaults: () => call<SharedVault[]>('cloud_shared_vaults'),
+  cloudJoinOnedrive: (folderId: string) => call<string>('cloud_join_onedrive', { folderId }),
   cloudInvites: (vaultId: Id) => call<CloudInvite[]>('cloud_invites', { vaultId }),
   cloudInvite: (vaultId: Id, email: string) => call<void>('cloud_invite', { vaultId, email }),
   cloudUninvite: (vaultId: Id, email: string) => call<void>('cloud_uninvite', { vaultId, email }),
   /** Opens the Google Picker to choose a shared vault folder; returns the vault's name. */
   cloudJoin: () => call<string>('cloud_join'),
   /** The cloud vaults in this Google account's Drive. */
-  cloudMyVaults: () => call<MyCloudVault[]>('cloud_my_vaults'),
+  cloudMyVaults: (provider?: CloudProvider) => call<MyCloudVault[]>('cloud_my_vaults', { provider }),
   /** Adds one of them to this device, from the Drive alone; returns its name. */
-  cloudAddMine: (folderId: string) => call<string>('cloud_add_mine', { folderId }),
+  cloudAddMine: (folderId: string, provider?: CloudProvider) => call<string>('cloud_add_mine', { folderId, provider }),
   cloudSyncNow: () => call<void>('cloud_sync_now'),
   openUrl: (url: string) => call<void>('open_url', { url }),
   /** What AI agents (through the Brain's MCP server) may do with the user's notes. */
@@ -338,6 +352,8 @@ export const api = {
   // settings
   getSetting: (key: string) => call<string | null>('get_setting', { key }),
   setSetting: (key: string, value: string) => call<void>('set_setting', { key, value }),
+  autostartGet: () => call<boolean>('autostart_get'),
+  autostartSet: (enabled: boolean) => call<void>('autostart_set', { enabled }),
 
   // grammar
   checkGrammar: (text: string) => call<GrammarIssue[]>('check_grammar', { text }),

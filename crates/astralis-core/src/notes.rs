@@ -49,6 +49,8 @@ pub struct Note {
     pub vault_id: Uuid,
     /// Folder within the vault; `None` = the vault root.
     pub folder_id: Option<Uuid>,
+    /// The note this one is a page of; `None` for a normal (top-level) note.
+    pub parent_id: Option<Uuid>,
     /// True when the note's vault is encrypted (content is stored as ciphertext).
     pub encrypted: bool,
     pub tags: Vec<String>,
@@ -81,6 +83,8 @@ pub struct NewNote {
     pub vault_id: Option<Uuid>,
     /// Folder to create the note in (must belong to the same vault).
     pub folder_id: Option<Uuid>,
+    /// Makes the note a page of this note (same vault).
+    pub parent_id: Option<Uuid>,
 }
 
 /// Partial update; `None` leaves the field unchanged.
@@ -122,7 +126,7 @@ pub struct TagCount {
 pub(crate) const NOTE_COLUMNS: &str =
     "id, title, body, created_at, updated_at, pinned, archived_at, vault_id, cipher,
      (SELECT group_concat(t.name, char(31)) FROM note_tags nt JOIN tags t ON t.id = nt.tag_id
-      WHERE nt.note_id = notes.id), kind, folder_id";
+      WHERE nt.note_id = notes.id), kind, folder_id, parent_id";
 
 /// A note row as stored: encrypted notes still carry their ciphertext.
 pub(crate) struct RawNote {
@@ -150,6 +154,7 @@ pub(crate) fn raw_note(row: &Row<'_>) -> rusqlite::Result<RawNote> {
             archived_at: row.get(6)?,
             vault_id: uuid_col(row, 7)?,
             folder_id: opt_uuid_col(row, 11)?,
+            parent_id: opt_uuid_col(row, 12)?,
             encrypted: cipher.is_some(),
             tags,
         },
@@ -213,6 +218,9 @@ impl Store {
         if let Some(folder) = new.folder_id {
             self.check_folder_in_vault(folder, vault_id)?;
         }
+        if let Some(parent) = new.parent_id {
+            self.check_page_parent(parent, vault_id, None)?;
+        }
         let now = now_ms();
         let id = Uuid::now_v7();
         let body = if new.kind == NoteKind::Whiteboard && new.body.trim().is_empty() {
@@ -237,9 +245,9 @@ impl Store {
             (new.title, body, None)
         };
         self.conn.execute(
-            "INSERT INTO notes (id, title, body, created_at, updated_at, pinned, archived_at, vault_id, cipher, kind, folder_id)
-             VALUES (?1, ?2, ?3, ?4, ?4, ?5, NULL, ?6, ?7, ?8, ?9)",
-            params![id.as_bytes(), title, body, now, new.pinned, vault_id.as_bytes(), cipher, new.kind.as_str(), opt_bytes(new.folder_id)],
+            "INSERT INTO notes (id, title, body, created_at, updated_at, pinned, archived_at, vault_id, cipher, kind, folder_id, parent_id)
+             VALUES (?1, ?2, ?3, ?4, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10)",
+            params![id.as_bytes(), title, body, now, new.pinned, vault_id.as_bytes(), cipher, new.kind.as_str(), opt_bytes(new.folder_id), opt_bytes(new.parent_id)],
         )?;
         if !encrypted {
             self.set_tags(id, &new.tags)?;
@@ -390,6 +398,8 @@ impl Store {
 
     /// Permanently removes a note and its history. Prefer `archive_note` for anything recoverable.
     pub fn delete_note(&self, id: Uuid) -> Result<()> {
+        // Its pages stay: they become ordinary notes.
+        self.conn.execute("UPDATE notes SET parent_id = NULL WHERE parent_id = ?1", [id.as_bytes()])?;
         let n = self
             .conn
             .execute("DELETE FROM notes WHERE id = ?1", [id.as_bytes()])?;
@@ -398,6 +408,46 @@ impl Store {
         } else {
             Ok(())
         }
+    }
+
+    /// A page's parent must be a top-level note of the same vault, and not the page itself or one of its own pages.
+    pub(crate) fn check_page_parent(&self, parent: Uuid, vault: Uuid, page: Option<Uuid>) -> Result<()> {
+        if page == Some(parent) {
+            return Err(Error::invalid("a note cannot be its own page"));
+        }
+        let (pv, pp): (Uuid, Option<Uuid>) = self
+            .conn
+            .query_row("SELECT vault_id, parent_id FROM notes WHERE id = ?1", [parent.as_bytes()], |r| Ok((uuid_col(r, 0)?, opt_uuid_col(r, 1)?)))
+            .optional()?
+            .ok_or(Error::NotFound("note", parent))?;
+        if pv != vault {
+            return Err(Error::invalid("a page must be in the same vault as its note"));
+        }
+        if pp.is_some() {
+            return Err(Error::invalid("pages cannot have pages of their own"));
+        }
+        Ok(())
+    }
+
+    /// The pages of a note, oldest first.
+    pub fn list_pages(&self, parent: Uuid) -> Result<Vec<Note>> {
+        let mut stmt = self.conn.prepare(&format!("SELECT {NOTE_COLUMNS} FROM notes WHERE parent_id = ?1 AND archived_at IS NULL ORDER BY created_at, id"))?;
+        let raws = stmt.query_map([parent.as_bytes()], raw_note)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        raws.into_iter().map(|r| self.hydrate(r)).collect()
+    }
+
+    /// Turns a note into a page of `parent`, or back into a normal note with `None`.
+    pub fn set_note_parent(&self, id: Uuid, parent: Option<Uuid>) -> Result<Note> {
+        let note = self.get_note(id)?;
+        if let Some(p) = parent {
+            self.check_page_parent(p, note.vault_id, Some(id))?;
+            let has_pages: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM notes WHERE parent_id = ?1)", [id.as_bytes()], |r| r.get(0))?;
+            if has_pages {
+                return Err(Error::invalid("a note with pages cannot become a page"));
+            }
+        }
+        self.conn.execute("UPDATE notes SET parent_id = ?2 WHERE id = ?1", params![id.as_bytes(), opt_bytes(parent)])?;
+        self.get_note(id)
     }
 
     fn exec_note_flag(&self, sql: &str, params: impl rusqlite::Params, id: Uuid) -> Result<Note> {

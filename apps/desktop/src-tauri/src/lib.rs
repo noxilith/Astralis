@@ -120,6 +120,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin_opener()
+        .plugin_autostart()
         .setup(|app| {
             cloud::remember_app(app.handle());
             // Leftovers from an update that just finished (the old .exe or .app).
@@ -150,6 +151,7 @@ pub fn run() {
             brain_cmds::spawn_brain_watch(app.handle().clone(), state.clone());
             brain_cmds::spawn_outside_edits_watch(app.handle().clone(), state.clone());
             theme_cmds::spawn_matugen_watch(app.handle().clone());
+            start_minimized_if_asked(app.handle());
             spawn_p2p(app.handle().clone(), state, data_dir.join("device.key"));
             Ok(())
         })
@@ -183,6 +185,20 @@ fn spawn_p2p(app: AppHandle, state: SharedState, key_path: PathBuf) {
 trait OpenerPlugin {
     fn plugin_opener(self) -> Self;
 }
+trait AutostartPlugin {
+    fn plugin_autostart(self) -> Self;
+}
+impl AutostartPlugin for tauri::Builder<tauri::Wry> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn plugin_autostart(self) -> Self {
+        self.plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    fn plugin_autostart(self) -> Self {
+        self
+    }
+}
+
 impl OpenerPlugin for tauri::Builder<tauri::Wry> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     fn plugin_opener(self) -> Self {
@@ -249,5 +265,23 @@ mod mobile_reminders {
         pub fn handed_over(&self, r: &astralis_core::tasks::Reminder) -> bool {
             self.sent.get(&r.id) == Some(&r.remind_at)
         }
+    }
+}
+
+/// "Start minimized": the window is created hidden (tauri.conf.json) and shown here, minimized
+/// when the setting is on. Phones have no such window.
+fn start_minimized_if_asked(app: &AppHandle) {
+    let Some(win) = app.get_webview_window("main") else { return };
+    let minimized = !cfg!(any(target_os = "android", target_os = "ios"))
+        && app
+            .state::<SharedState>()
+            .store
+            .lock()
+            .ok()
+            .and_then(|s| s.get_setting("start_minimized").ok().flatten())
+            .is_some_and(|v| v == "on");
+    let _ = win.show();
+    if minimized {
+        let _ = win.minimize();
     }
 }

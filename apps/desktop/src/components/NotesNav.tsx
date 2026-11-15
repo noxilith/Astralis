@@ -66,7 +66,8 @@ export function NotesNav() {
         api.listFolders(vaultId),
         api.listTags(vaultId),
       ])
-      setNotes(list)
+      // Pages live in their note's side panel, not in the list (except when filtering by tag or archive).
+      setNotes(listMode.kind === 'archive' || listMode.kind === 'tag' ? list : list.filter((n) => !n.parentId))
       setFolders(fs)
       setTags(ts)
     } catch (e) {

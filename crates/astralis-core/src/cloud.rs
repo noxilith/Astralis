@@ -38,6 +38,7 @@ pub(crate) const CLOUD_MIGRATION: &str = "
 
 /// Providers a cloud vault can live on.
 pub const GOOGLE_DRIVE: &str = "google-drive";
+pub const ONEDRIVE: &str = "onedrive";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

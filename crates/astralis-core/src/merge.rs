@@ -76,6 +76,7 @@ impl Store {
             pinned: notes.iter().any(|n| n.pinned),
             vault_id: Some(vault),
             folder_id: notes[0].folder_id,
+            parent_id: None,
         })?;
         for n in &notes {
             if !n.title.trim().is_empty()

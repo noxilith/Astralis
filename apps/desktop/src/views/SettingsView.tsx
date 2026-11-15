@@ -3,6 +3,7 @@ import { Cloud, Sparkles } from 'lucide-react'
 import { api, type BrainStatus } from '../api'
 import { Devices } from '../components/Devices'
 import { GoogleDriveSettings } from '../components/GoogleDrive'
+import { OneDriveSettings } from '../components/OneDrive'
 import { UpdatesSection } from '../components/Updates'
 import { ACCENT_PRESETS, MATUGEN_CONFIG, MATUGEN_TEMPLATE, type Theme } from '../lib/theme'
 import { CopyBlock } from './BrainView'
@@ -83,6 +84,7 @@ export function SettingsView({ theme, setTheme, accent, setAccent, matugenPath, 
           </div>
         </div>
       </div>
+      {!PHONE && <StartupSection />}
       <div className="section">
         <h2>Notes</h2>
         <label className="checkbox">
@@ -113,7 +115,8 @@ export function SettingsView({ theme, setTheme, accent, setAccent, matugenPath, 
           subfolder per vault, holding only end-to-end encrypted data. Invite people by email; you then edit together live, P2P.
         </p>
         <GoogleDriveSettings />
-        {['Microsoft OneDrive', 'Box', 'Dropbox', 'pCloud'].map((p) => (
+        <OneDriveSettings />
+        {['Box', 'Dropbox', 'pCloud'].map((p) => (
           <div key={p} className="row" style={{ padding: '7px 0', borderBottom: '1px solid var(--border)', maxWidth: 520 }}>
             <Cloud size={15} className="muted" />
             <span className="grow">{p}</span>
@@ -255,6 +258,46 @@ export function SettingsView({ theme, setTheme, accent, setAccent, matugenPath, 
           </table>
         </div>
       )}
+    </div>
+  )
+}
+
+function StartupSection() {
+  const [auto, setAuto] = useState(false)
+  const [minimized, setMinimized] = useState(false)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    api.autostartGet().then(setAuto).catch(() => {})
+    api.getSetting('start_minimized').then((v) => setMinimized(v === 'on')).catch(() => {})
+  }, [])
+  return (
+    <div className="section">
+      <h2>Startup</h2>
+      <label className="checkbox">
+        <input
+          type="checkbox"
+          checked={auto}
+          onChange={(e) => {
+            const on = e.target.checked
+            setError('')
+            api.autostartSet(on).then(() => setAuto(on)).catch((err) => setError(String(err)))
+          }}
+        />
+        Start Astralis when I log in
+      </label>
+      <label className="checkbox">
+        <input
+          type="checkbox"
+          checked={minimized}
+          onChange={(e) => {
+            const on = e.target.checked
+            setMinimized(on)
+            void api.setSetting('start_minimized', on ? 'on' : 'off')
+          }}
+        />
+        Start minimized (the window opens in the taskbar instead of in front)
+      </label>
+      {error && <p className="small" style={{ color: 'var(--danger)' }}>{error}</p>}
     </div>
   )
 }

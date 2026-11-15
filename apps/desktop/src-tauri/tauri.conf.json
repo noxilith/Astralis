@@ -13,6 +13,7 @@
       {
         "label": "main",
         "title": "Astralis",
+        "visible": false,
         "width": 1320,
         "height": 840,
         "minWidth": 900,

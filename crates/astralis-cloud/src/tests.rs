@@ -6,7 +6,7 @@ use astralis_core::cloud::{CloudVault, GOOGLE_DRIVE};
 use astralis_core::notes::{ListFilter, NewNote, NotePatch};
 
 use super::*;
-use crate::drive::{DriveFiles, RemoteFile};
+use crate::drive::{CloudDrive, DriveFiles, FolderInfo, RemoteFile};
 use crate::sync::{EXT, open_changes, seal_changes};
 
 /// An in-memory drive. `hidden` files exist but this account can't read them (like files
@@ -18,6 +18,9 @@ struct MemDrive {
     hidden: Mutex<Vec<String>>,
     account: Mutex<String>,
     folder_owner: Mutex<std::collections::HashMap<String, String>>,
+    /// Folders: id, parent, name, private properties.
+    folders: Mutex<Vec<(String, String, String, std::collections::BTreeMap<String, String>)>>,
+    shared: Mutex<Vec<String>>,
 }
 
 impl MemDrive {
@@ -233,4 +236,81 @@ async fn a_device_with_only_the_key_and_folder_gets_the_whole_vault_from_the_dri
     let got = b.lock().unwrap().get_vault(v.id).unwrap();
     assert_eq!(got.name, "Family");
     assert_eq!(titles(&b, v.id), vec!["Recipes"]);
+}
+
+impl CloudDrive for MemDrive {
+    fn provider(&self) -> &'static str {
+        GOOGLE_DRIVE
+    }
+    fn label(&self) -> &'static str {
+        "Memory Drive"
+    }
+    async fn email(&self) -> Result<String> {
+        Ok(self.account.lock().unwrap().clone())
+    }
+    async fn root_folder(&self) -> Result<String> {
+        let found = self.folders.lock().unwrap().iter().find(|f| f.1 == "root" && f.2 == "Astralis").map(|f| f.0.clone());
+        match found {
+            Some(id) => Ok(id),
+            None => self.create_folder("Astralis", "root", &Default::default()).await,
+        }
+    }
+    async fn create_folder(&self, name: &str, parent: &str, props: &std::collections::BTreeMap<String, String>) -> Result<String> {
+        let id = format!("d{}", self.folders.lock().unwrap().len());
+        self.folders.lock().unwrap().push((id.clone(), parent.into(), name.into(), props.clone()));
+        Ok(id)
+    }
+    async fn folder(&self, id: &str) -> Result<FolderInfo> {
+        let folders = self.folders.lock().unwrap();
+        let f = folders.iter().find(|f| f.0 == id).ok_or_else(|| anyhow!("not found"))?;
+        Ok(FolderInfo { id: f.0.clone(), name: f.2.clone(), props: f.3.clone() })
+    }
+    async fn subfolders(&self, parent: &str) -> Result<Vec<FolderInfo>> {
+        Ok(self.folders.lock().unwrap().iter().filter(|f| f.1 == parent).map(|f| FolderInfo { id: f.0.clone(), name: f.2.clone(), props: f.3.clone() }).collect())
+    }
+    async fn set_props(&self, id: &str, props: &std::collections::BTreeMap<String, Option<String>>) -> Result<()> {
+        let mut folders = self.folders.lock().unwrap();
+        let f = folders.iter_mut().find(|f| f.0 == id).ok_or_else(|| anyhow!("not found"))?;
+        f.3 = crate::onedrive::merge_props(std::mem::take(&mut f.3), props);
+        Ok(())
+    }
+    async fn share_with(&self, id: &str, email: &str, _message: &str) -> Result<()> {
+        self.shared.lock().unwrap().push(format!("{id}:{email}"));
+        Ok(())
+    }
+    async fn unshare_with(&self, id: &str, email: &str) -> Result<()> {
+        self.shared.lock().unwrap().retain(|s| *s != format!("{id}:{email}"));
+        Ok(())
+    }
+}
+
+/// Any drive gives the same cloud-vault behaviour: make a vault, see it from another device of the
+/// same account, add it there, and invite and remove someone.
+#[tokio::test]
+async fn a_cloud_vault_made_on_one_device_is_found_added_and_shared_on_any_drive() {
+    let drive = MemDrive::default();
+    drive.sign_in("me@example.com");
+    let (a, b) = (handle(), handle());
+    let vault = create_cloud_vault(&drive, &a, "Notes", "dev-a", "Desktop").await.unwrap();
+    a.lock().unwrap().create_note(NewNote { title: "Hello".into(), vault_id: Some(vault.id), ..Default::default() }).unwrap();
+    assert_eq!(a.lock().unwrap().cloud_vault(vault.id).unwrap().unwrap().provider, GOOGLE_DRIVE);
+    sync_vault(&drive, &a, vault.id).await.unwrap();
+
+    // The other device sees it in the account's Astralis folder, and adds it from the drive alone.
+    let mine = my_cloud_vaults(&drive).await.unwrap();
+    assert_eq!(mine.len(), 1);
+    assert!(mine[0].ready && mine[0].name == "Notes" && mine[0].owner_name == "Desktop");
+    let (id, name) = add_my_cloud_vault(&drive, &b, &mine[0].folder_id).await.unwrap();
+    assert_eq!((id, name.as_str()), (vault.id, "Notes"));
+    sync_vault(&drive, &b, vault.id).await.unwrap();
+    assert_eq!(titles(&b, vault.id), vec!["Hello"]);
+
+    // Inviting shares the folder and leaves a secret the invited person can read; removing undoes both.
+    invite(&drive, &a, vault.id, "Friend@Example.com", "Me").await.unwrap();
+    assert_eq!(drive.shared.lock().unwrap().len(), 1);
+    let ticket = join_ticket(&drive, &mine[0].folder_id, "friend@example.com").await.unwrap();
+    assert_eq!((ticket.vault, ticket.owner.as_str()), (vault.id, "dev-a"));
+    uninvite(&drive, &a, vault.id, "friend@example.com").await.unwrap();
+    assert!(drive.shared.lock().unwrap().is_empty());
+    assert!(join_ticket(&drive, &mine[0].folder_id, "friend@example.com").await.is_err());
 }

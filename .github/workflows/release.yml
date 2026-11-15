@@ -37,6 +37,7 @@ env:
   # Google Drive sign-in, baked in at build time (left out when the secrets aren't set).
   ASTRALIS_GOOGLE_CLIENT_ID: ${{ secrets.ASTRALIS_GOOGLE_CLIENT_ID }}
   ASTRALIS_GOOGLE_CLIENT_SECRET: ${{ secrets.ASTRALIS_GOOGLE_CLIENT_SECRET }}
+  ASTRALIS_ONEDRIVE_CLIENT_ID: ${{ secrets.ASTRALIS_ONEDRIVE_CLIENT_ID }}
 
 jobs:
   build:

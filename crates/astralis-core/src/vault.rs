@@ -376,6 +376,7 @@ impl Store {
         if note.vault_id == target {
             return Ok(note);
         }
+        let pages: Vec<Uuid> = self.list_pages(note_id)?.into_iter().map(|p| p.id).collect();
         let id = note_id.as_bytes();
         if self.vault_is_encrypted(target)? {
             let plain = serde_json::to_vec(&SecretContent {
@@ -392,13 +393,13 @@ impl Store {
             self.conn
                 .execute("DELETE FROM embeddings WHERE note_id = ?1", [id])?;
             self.conn.execute(
-                "UPDATE notes SET title = '', body = '', cipher = ?2, vault_id = ?3, folder_id = NULL, crdt = NULL, updated_at = ?4 WHERE id = ?1",
+                "UPDATE notes SET title = '', body = '', cipher = ?2, vault_id = ?3, folder_id = NULL, parent_id = NULL, crdt = NULL, updated_at = ?4 WHERE id = ?1",
                 params![id, cipher, target.as_bytes(), now_ms()],
             )?;
             self.prune_tags()?;
         } else {
             self.conn.execute(
-                "UPDATE notes SET title = ?2, body = ?3, cipher = NULL, vault_id = ?4, folder_id = NULL, crdt = NULL, updated_at = ?5 WHERE id = ?1",
+                "UPDATE notes SET title = ?2, body = ?3, cipher = NULL, vault_id = ?4, folder_id = NULL, parent_id = NULL, crdt = NULL, updated_at = ?5 WHERE id = ?1",
                 params![id, note.title, note.body, target.as_bytes(), now_ms()],
             )?;
             if note.kind == NoteKind::Note {
@@ -408,6 +409,11 @@ impl Store {
         // Images travel with the note (re-encrypted or decrypted as needed).
         self.rehome_attachments(&note.body, target)?;
         self.refresh_crdt(note_id)?;
+        // Its pages go with it.
+        for p in pages {
+            self.move_note_to_vault(p, target)?;
+            self.set_note_parent(p, Some(note_id))?;
+        }
         self.get_note(note_id)
     }
 }

@@ -176,6 +176,7 @@ export function CloudInvitesModal({ vault, onClose }: { vault: Vault; onClose: (
   const [busy, setBusy] = useState(false)
   // A member's older Astralis still has files in the folder; what to try again once they update.
   const [blocked, setBlocked] = useState<{ retry: () => Promise<void> } | null>(null)
+  const label = vault.cloud === 'onedrive' ? 'OneDrive' : 'Google Drive'
   const load = () => api.cloudInvites(vault.id).then(setInvites).catch(fail)
   /** Runs a sharing change; if members' old files are in the way, explains that instead. */
   const sharing = async (change: () => Promise<void>) => {
@@ -203,7 +204,7 @@ export function CloudInvitesModal({ vault, onClose }: { vault: Vault; onClose: (
     const who = email.trim()
     await sharing(async () => {
       await api.cloudInvite(vault.id, who)
-      toast(`Invited ${who} — Google emails them the folder`)
+      toast(`Invited ${who} — ${label} emails them the folder`)
       setEmail('')
       await load()
     })
@@ -213,8 +214,8 @@ export function CloudInvitesModal({ vault, onClose }: { vault: Vault; onClose: (
   return (
     <Modal title={`People in “${vault.name}”`} onClose={onClose} footer={<button className="btn" onClick={onClose}>Done</button>}>
       <p className="small muted" style={{ marginTop: 0 }}>
-        Invite someone by their Google email. Google emails them the vault's Drive folder; in Astralis they choose{' '}
-        <b>Join shared vault from Google Drive…</b> and pick it. Then you edit together live — no pairing code. Google only ever stores
+        Invite someone by their {vault.cloud === 'onedrive' ? 'Microsoft' : 'Google'} email. {label} emails them the vault's folder; in Astralis they choose{' '}
+        <b>Join shared vault from {label}…</b> and pick it. Then you edit together live — no pairing code. {label} only ever stores
         encrypted data. Drive keeps your own devices in sync; the people you invite sync with you directly while you're both online.
       </p>
       <div className="row" style={{ marginBottom: 12 }}>
@@ -234,7 +235,7 @@ export function CloudInvitesModal({ vault, onClose }: { vault: Vault; onClose: (
         <div className="drive-access">
           <b>Waiting for the people in this vault to update Astralis</b>
           <p className="small muted">
-            Someone here still has files in this vault's Drive folder from an older version of Astralis, and Google won't let Astralis
+            Someone here still has files in this vault's Drive folder from an older version of Astralis, and {label} won't let Astralis
             change who the folder is shared with until they're gone. They're removed automatically once everyone in the vault has updated
             Astralis (1.0.2 or newer) and opened it. Then try again.
           </p>

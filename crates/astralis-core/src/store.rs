@@ -218,6 +218,13 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     "#,
 ];
 
+/// A note can sit under another note (its "pages"). No foreign key: rows sync in any order.
+/// Always the last migration run; add newer ones after it in `Store::migrate`.
+const PAGES_MIGRATION: &str = r#"
+ALTER TABLE notes ADD COLUMN parent_id BLOB;
+CREATE INDEX notes_parent_idx ON notes(parent_id);
+"#;
+
 /// The Astralis local database plus in-memory state (unlocked vault keys).
 pub struct Store {
     pub(crate) conn: Connection,
@@ -273,6 +280,7 @@ impl Store {
             .chain(std::iter::once(crate::sync::LEGACY_VAULTS_MIGRATION.to_string()))
             .chain(std::iter::once(crate::cloud::CLOUD_MIGRATION.to_string()))
             .chain(std::iter::once(crate::memory::BRAIN_MIGRATION.to_string()))
+            .chain(std::iter::once(PAGES_MIGRATION.to_string()))
             .collect();
         for (i, sql) in all.iter().enumerate().skip(current as usize) {
             let tx = self.conn.transaction()?;

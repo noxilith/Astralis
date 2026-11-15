@@ -1,14 +1,21 @@
 import { useState } from 'react'
 import { Check, ChevronsUpDown, Cloud, Copy, FolderOpen, KeyRound, Lock, LockOpen, LogOut, Mail, Pencil, Plus, Shapes, ShieldPlus, Trash2, Users } from 'lucide-react'
-import { api, type Vault } from '../api'
+import { api, type CloudProvider, type Vault } from '../api'
 import { useApp } from '../context'
 import { Modal, Spinner, useConfirm, usePrompt } from './ui'
 import { DuplicatesModal, OrganizeModal } from './VaultTools'
 import { useCollab } from '../lib/collab'
 import { CloudInvitesModal, useGoogle } from './GoogleDrive'
 import { AddCloudVaultModal } from './AddCloudVault'
+import { JoinOneDriveModal, useOneDrive } from './OneDrive'
 
-const CLOUD_PROVIDERS = ['Google Drive', 'Microsoft OneDrive', 'Box', 'Dropbox', 'pCloud']
+const CLOUD_PROVIDERS: { name: string; id: CloudProvider | null }[] = [
+  { name: 'Google Drive', id: 'google-drive' },
+  { name: 'Microsoft OneDrive', id: 'onedrive' },
+  { name: 'Box', id: null },
+  { name: 'Dropbox', id: null },
+  { name: 'pCloud', id: null },
+]
 
 /** Shared vaults (shared with you, or shared by you): a folder with two people in it. Encrypted
  *  ones get a small padlock (closed while locked). Distinct from your own (folder) and cloud. */
@@ -65,16 +72,21 @@ export function VaultSwitcher() {
   const [people, setPeople] = useState(false)
   const [cloudName, setCloudName] = useState('')
   const google = useGoogle()
+  const onedrive = useOneDrive()
+  const [joinOneOpen, setJoinOneOpen] = useState(false)
+  const [cloudProvider, setCloudProvider] = useState<CloudProvider>('google-drive')
+  const accountOf = (p: CloudProvider) => (p === 'onedrive' ? onedrive?.email : google?.email)
+  const providerName = (p: CloudProvider) => (p === 'onedrive' ? 'OneDrive' : 'Google Drive')
 
   const createCloud = async () => {
     setBusy(true)
     try {
-      const v = await api.createCloudVault(cloudName)
+      const v = await api.createCloudVault(cloudName, cloudProvider)
       setCloudOpen(false)
       setCloudName('')
       await afterChange()
       switchTo(v.id)
-      toast(`“${v.name}” is on Google Drive. Invite people from its menu.`)
+      toast(`“${v.name}” is on ${providerName(cloudProvider)}. Invite people from its menu.`)
     } catch (e) {
       fail(e)
     } finally {
@@ -213,7 +225,7 @@ export function VaultSwitcher() {
             <button onClick={() => (setOpen(false), setForm({ encrypted: true, name: '', password: '', confirm: '' }))}>
               <ShieldPlus size={14} /> New encrypted vault
             </button>
-            <button onClick={() => (setOpen(false), setCloudOpen(true))}>
+            <button onClick={() => (setOpen(false), setCloudProvider(google?.email || !onedrive?.email ? 'google-drive' : 'onedrive'), setCloudOpen(true))}>
               <Cloud size={14} /> New cloud vault…
             </button>
             <button onClick={() => (setOpen(false), setAddOpen(true))}>
@@ -222,6 +234,11 @@ export function VaultSwitcher() {
             {google?.email && (
               <button onClick={join}>
                 <Users size={14} /> Join shared vault from Google Drive…
+              </button>
+            )}
+            {onedrive?.email && (
+              <button onClick={() => (setOpen(false), setJoinOneOpen(true))}>
+                <Users size={14} /> Join shared vault from OneDrive…
               </button>
             )}
             {current && (
@@ -389,9 +406,9 @@ export function VaultSwitcher() {
           footer={
             <>
               <button className="btn" onClick={() => setCloudOpen(false)}>Close</button>
-              {google?.email ? (
+              {accountOf(cloudProvider) ? (
                 <button className="btn primary" disabled={busy || !cloudName.trim()} onClick={createCloud}>
-                  {busy && <Spinner />} Create on Google Drive
+                  {busy && <Spinner />} Create on {providerName(cloudProvider)}
                 </button>
               ) : (
                 <button className="btn primary" onClick={() => (setCloudOpen(false), setView('settings'))}>Connect a drive in Settings</button>
@@ -405,23 +422,39 @@ export function VaultSwitcher() {
           </p>
           <div className="list">
             {CLOUD_PROVIDERS.map((p) => {
-              const ready = p === 'Google Drive' && !!google?.email
+              const account = p.id ? accountOf(p.id) : null
+              const chosen = !!p.id && p.id === cloudProvider
               return (
-                <div key={p} className="list-item" style={{ opacity: ready ? 1 : 0.55, cursor: 'default', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <Cloud size={14} /> <span className="grow">{p}</span>
-                  <span className="small faint">{ready ? google?.email : p === 'Google Drive' ? 'Not connected' : 'Coming soon'}</span>
-                  {ready && <Check size={14} />}
+                <div
+                  key={p.name}
+                  className={'list-item' + (chosen ? ' active' : '')}
+                  style={{ opacity: account ? 1 : 0.55, cursor: account ? 'pointer' : 'default', flexDirection: 'row', alignItems: 'center', gap: 8 }}
+                  onClick={() => account && p.id && setCloudProvider(p.id)}
+                >
+                  <Cloud size={14} /> <span className="grow">{p.name}</span>
+                  <span className="small faint">{account ?? (p.id ? 'Not connected' : 'Coming soon')}</span>
+                  {chosen && account && <Check size={14} />}
                 </div>
               )
             })}
           </div>
-          {google?.email && (
+          {accountOf(cloudProvider) && (
             <div className="field" style={{ marginTop: 12 }}>
               <label>Vault name</label>
               <input className="input" autoFocus value={cloudName} placeholder="e.g. Family" onChange={(e) => setCloudName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && cloudName.trim() && createCloud()} />
             </div>
           )}
         </Modal>
+      )}
+      {joinOneOpen && (
+        <JoinOneDriveModal
+          onClose={() => setJoinOneOpen(false)}
+          onJoined={async (name) => {
+            setJoinOneOpen(false)
+            await afterChange()
+            toast(`Joined “${name}”`)
+          }}
+        />
       )}
       {addOpen && (
         <AddCloudVaultModal

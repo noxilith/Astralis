@@ -2209,3 +2209,26 @@ fn a_hook_doesnt_repeat_memories_it_already_gave_this_session() {
     shown.extend(handles);
     assert!(s.brain_hook_prompt_new(p, "another python script for editing files please", &shown).unwrap().is_none(), "already given");
 }
+
+#[test]
+fn a_note_can_have_pages_that_stay_with_it() {
+    let mut s = store();
+    let book = s.create_note(NewNote { title: "Book".into(), ..Default::default() }).unwrap();
+    let one = s.create_note(NewNote { title: "One".into(), parent_id: Some(book.id), ..Default::default() }).unwrap();
+    let two = s.create_note(NewNote { title: "Two".into(), parent_id: Some(book.id), ..Default::default() }).unwrap();
+    assert_eq!(one.parent_id, Some(book.id));
+    assert_eq!(s.list_pages(book.id).unwrap().iter().map(|n| n.title.as_str()).collect::<Vec<_>>(), ["One", "Two"]);
+    // One level only, and never itself.
+    assert!(s.create_note(NewNote { parent_id: Some(one.id), ..Default::default() }).is_err());
+    assert!(s.set_note_parent(book.id, Some(book.id)).is_err());
+    assert!(s.set_note_parent(book.id, Some(two.id)).is_err(), "a note with pages can't become a page");
+    // Moving the note moves its pages.
+    let other = s.create_vault("Other", None).unwrap().id;
+    s.move_note_to_vault(book.id, other).unwrap();
+    assert_eq!(s.get_note(one.id).unwrap().vault_id, other);
+    assert_eq!(s.get_note(one.id).unwrap().parent_id, Some(book.id));
+    // Detaching and deleting.
+    assert_eq!(s.set_note_parent(two.id, None).unwrap().parent_id, None);
+    s.delete_note(book.id).unwrap();
+    assert_eq!(s.get_note(one.id).unwrap().parent_id, None, "pages of a deleted note become ordinary notes");
+}
