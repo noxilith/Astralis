@@ -369,6 +369,49 @@ fn make_executable(path: &Path) -> Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).map_err(|e| fail(format!("Couldn't make the update executable: {e}")))
 }
 
+/// The last lines flatpak printed (errors go to stderr), for showing to the user.
+fn flatpak_said(out: &std::process::Output) -> String {
+    let text = format!("{}\n{}", String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let tail = lines[lines.len().saturating_sub(3)..].join(" ");
+    if tail.is_empty() { format!("it exited with {}", out.status) } else { tail.chars().take(300).collect() }
+}
+
+/// Windows can't replace a program that's running. The Brain's server (`astralis-mcp.exe`, next to
+/// Astralis) is started by AI tools and stays running, so the installer failed on it. Moving it
+/// aside works while it runs (the installer then writes the new one); if it can't be moved, the
+/// running copies are stopped and the AI tool starts a new one when it needs it.
+#[cfg(windows)]
+fn move_mcp_aside() {
+    use std::os::windows::process::CommandExt;
+    let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) else { return };
+    let mcp = dir.join("astralis-mcp.exe");
+    if !mcp.exists() {
+        return;
+    }
+    let old = dir.join("astralis-mcp.exe.old");
+    let _ = std::fs::remove_file(&old);
+    if std::fs::rename(&mcp, &old).is_err() {
+        let _ = std::process::Command::new("taskkill").args(["/F", "/IM", "astralis-mcp.exe"]).creation_flags(0x0800_0000).status();
+    }
+}
+
+/// After an update: remove the old server that was moved aside, or put it back if the installer
+/// never wrote a new one.
+#[cfg(windows)]
+fn settle_mcp_after_update() {
+    let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) else { return };
+    let (mcp, old) = (dir.join("astralis-mcp.exe"), dir.join("astralis-mcp.exe.old"));
+    if !old.exists() {
+        return;
+    }
+    if mcp.exists() {
+        let _ = std::fs::remove_file(&old); // may still be running: it goes next time
+    } else {
+        let _ = std::fs::rename(&old, &mcp);
+    }
+}
+
 fn put_in_place(kind: &InstallKind, data: &[u8], name: &str) -> Result<()> {
     match kind {
         InstallKind::AppImage(image) => {
@@ -397,14 +440,17 @@ fn put_in_place(kind: &InstallKind, data: &[u8], name: &str) -> Result<()> {
             let bundle = dir.join(name);
             std::fs::write(&bundle, data).map_err(|e| fail(format!("Couldn't save the update: {e}")))?;
             let scope = if *user { "--user" } else { "--system" };
-            let status = std::process::Command::new("flatpak-spawn")
-                .args(["--host", "flatpak", "install", scope, "--noninteractive", "-y", "--bundle"])
+            // No terminal here: nothing may wait for an answer (stdin closed), and what flatpak says is
+            // kept so a failure can tell you why.
+            let out = std::process::Command::new("flatpak-spawn")
+                .args(["--host", "flatpak", "install", scope, "--noninteractive", "--assumeyes", "--bundle"])
                 .arg(&bundle)
-                .status()
+                .stdin(std::process::Stdio::null())
+                .output()
                 .map_err(|e| fail(format!("Couldn't run flatpak: {e}")))?;
             let _ = std::fs::remove_file(&bundle);
-            if !status.success() {
-                return Err(fail("flatpak couldn't install the update."));
+            if !out.status.success() {
+                return Err(fail(format!("flatpak couldn't install the update: {}", flatpak_said(&out))));
             }
             let id = std::env::var("FLATPAK_ID").unwrap_or_else(|_| "app.astralis.desktop".into());
             start(Path::new("flatpak-spawn"), &["--host", "flatpak", "run", &id])
@@ -415,6 +461,8 @@ fn put_in_place(kind: &InstallKind, data: &[u8], name: &str) -> Result<()> {
             }
             let setup = std::env::temp_dir().join(name);
             std::fs::write(&setup, data).map_err(|e| fail(format!("Couldn't save the update: {e}")))?;
+            #[cfg(windows)]
+            move_mcp_aside();
             // Passive (a progress bar, no questions), over the old install, then start Astralis.
             start(&setup, &["/P", "/R", "/UPDATE"])
         }
@@ -509,6 +557,8 @@ fn unzip(archive: &[u8], target: &Path) -> Result<()> {
 
 /// Removes what an earlier update left behind (the old portable `.exe`, the old `.app`).
 pub fn clean_up_after_update() {
+    #[cfg(windows)]
+    settle_mcp_after_update();
     match install_kind() {
         InstallKind::WindowsPortable(exe) => {
             let _ = std::fs::remove_file(exe.with_extension("exe.old"));
@@ -584,6 +634,16 @@ mod tests {
         assert_eq!(pick("macos_arm64", InstallKind::MacBundle("/A.app".into())).unwrap(), "Astralis_1.2.0_macos_arm64.app.zip");
         assert_eq!(pick("macos_x64", InstallKind::MacBundle("/A.app".into())), None);
         assert_eq!(pick("linux_x64", InstallKind::Unmanaged), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn what_flatpak_said_is_shown_when_an_install_fails() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = std::process::Output { status: std::process::ExitStatus::from_raw(256), stdout: b"Installing\n".to_vec(), stderr: b"\nerror: Invalid input\n".to_vec() };
+        assert!(flatpak_said(&out).contains("Invalid input"));
+        let silent = std::process::Output { status: std::process::ExitStatus::from_raw(256), stdout: vec![], stderr: vec![] };
+        assert!(flatpak_said(&silent).contains("exited with"));
     }
 
     #[test]
