@@ -314,7 +314,7 @@ fn is_ours(entry: &serde_json::Value) -> bool {
     entry["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| h["command"].as_str().is_some_and(|c| c.contains("astralis-mcp") && c.contains(" hook "))))
 }
 
-const HOOK_EVENTS: [(&str, &str); 3] = [("SessionStart", "session-start"), ("UserPromptSubmit", "prompt"), ("Stop", "stop")];
+const HOOK_EVENTS: [(&str, &str); 4] = [("SessionStart", "session-start"), ("UserPromptSubmit", "prompt"), ("SubagentStart", "subagent-start"), ("Stop", "stop")];
 
 /// Puts our hooks into a settings document, replacing earlier copies of ours and leaving
 /// everything else as it was. \`stop\`: also the save reminder (otherwise it's removed).
@@ -342,7 +342,7 @@ fn merge_hooks(root: &mut serde_json::Value, server: &str, args: &[String], stop
 
 fn hooks_status_of(root: &serde_json::Value, path: &std::path::Path) -> HooksStatus {
     let has = |event: &str| root["hooks"][event].as_array().is_some_and(|l| l.iter().any(is_ours));
-    HooksStatus { installed: has("SessionStart") && has("UserPromptSubmit"), stop: has("Stop"), path: path.to_string_lossy().to_string() }
+    HooksStatus { installed: has("SessionStart") && has("UserPromptSubmit") && has("SubagentStart"), stop: has("Stop"), path: path.to_string_lossy().to_string() }
 }
 
 fn read_settings(path: &std::path::Path) -> Result<serde_json::Value> {

@@ -22,17 +22,17 @@ use serde_json::{Value, json};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const INSTRUCTIONS: &str = "Astralis Brain is this project's long-term memory (shared across sessions and AI tools). Use it to save tokens:
-0. The Brain replaces digging through old chats. Never search or read earlier chat logs, session transcripts or history files (for example ~/.claude/projects) to find what was decided, learned or done before: ask the Brain. If it isn't there, ask the user or read the code, then save the answer so nobody has to look again.
-1. At the start of a task, call brain_context once, with the task in a sentence: a short index of what's already known (one line per memory).
-2. Before re-reading files, grepping, or asking the user something you may have learned before, try brain_recall (by meaning) or brain_map (which file does what). Read a memory in full with brain_read only if the trimmed lines aren't enough.
-3. When you learn something durable, save it with brain_remember: one idea per memory, a one-line hook that says the point, details only if needed. Good: decisions and why, gotchas, build/test commands, user preferences (scope \"me\" if they apply to every project), where things live. Don't save secrets, or anything obvious from the code or git history.
-4. When you work out what files do, record them with brain_map_note (path + one-line purpose). brain_map flags files changed since — re-read only those.
-5. If a memory turns out wrong or outdated, brain_update or brain_forget it.
-6. Before you stop or at a natural pause, call brain_handoff: where things stand and what's next. It leads the next session's index, so nobody has to read this chat to continue.
-7. To see what's in a file, call code_outline (definitions with line numbers) and read only the lines you need; to find where something is defined, call code_find before grepping.
-The user's own notes (their notes app) are there too, only when they ask for something about them: notes_search or notes_list to find a note, notes_read to read it, then notes_edit (prefer a small old_text/new_text replacement over rewriting the whole body), notes_create, notes_move, notes_delete, and the notes_folder_* tools. Every edit keeps the note's history, and deleting archives a note (the user can restore it) unless you delete an already-archived note with permanent.
-The user's tasks and calendar work the same way, when they ask: plan_overview first (it also gives today's date and time), then planner_create to plan a project with its tasks, tasks_add / tasks_edit / tasks_list for to-dos, and calendar_add / calendar_edit / calendar_list for appointments and work sessions. Times are the user's local time (YYYY-MM-DD or YYYY-MM-DD HH:MM). Mark tasks done rather than deleting them.";
+const INSTRUCTIONS: &str = "Astralis Brain: this project's long-term memory, shared across sessions and AI tools. Use it to save tokens.
+0. Never dig through old chats, transcripts or history files (e.g. ~/.claude/projects) for past decisions: ask the Brain. Not there? Ask the user or read the code, then save the answer.
+1. Task start: brain_context once, with the task in a sentence.
+2. Before re-reading files, grepping or asking the user: brain_recall (by meaning) or brain_map (which file does what). brain_read only if the trimmed lines aren't enough.
+3. Durable learnings: brain_remember, one idea each, terse (fragments, no filler), a one-line hook that states the point, details only if needed. Good: decisions and why, gotchas, build/test commands, user preferences (scope \"me\" for every project), where things live. No secrets, nothing obvious from code or git.
+4. brain_map_note records what files do; brain_map flags files changed since: re-read only those.
+5. Wrong or outdated memory: brain_update or brain_forget.
+6. Before stopping or at a pause: brain_handoff (where things stand, what's next).
+7. code_outline lists a file's definitions with line numbers: read only the lines you need. code_find locates a definition: use before grepping.
+Only when asked about the user's own notes: notes_search/notes_list to find, notes_read to read, then notes_edit (prefer small old_text/new_text), notes_create, notes_move, notes_delete (archives; permanent only on archived notes), notes_folder_*. Edits keep history.
+Only when asked about tasks or the calendar: plan_overview first (it gives today's date and time), then planner_create, tasks_add/edit/list, calendar_add/edit/list. Times are local (YYYY-MM-DD[ HH:MM]). Mark tasks done rather than deleting.";
 
 fn data_dir() -> PathBuf {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default();
@@ -97,20 +97,20 @@ fn error_result(text: impl Into<String>) -> Value {
 }
 
 fn tools() -> Value {
-    let project = json!({ "type": "string", "description": "Path of the project (defaults to the current repository)." });
-    let vault = json!({ "type": "string", "description": "Vault name (default: the user's default vault). See notes_vaults." });
-    let note = json!({ "type": "string", "description": "The note's [handle] (from notes_search/notes_list) or exact title." });
+    let project = json!({ "type": "string", "description": "Project path (default: current repo)." });
+    let vault = json!({ "type": "string", "description": "Vault name (default vault if omitted)." });
+    let note = json!({ "type": "string", "description": "Note [handle] or exact title." });
     json!([
         {
             "name": "brain_context",
-            "description": "Short index of what's remembered about this project (and the user's general preferences): one line per memory with a [handle]. Call once at the start of a task, with the task in plain words so the relevant memories come first.",
-            "inputSchema": { "type": "object", "properties": { "project": project, "task": { "type": "string", "description": "What you're about to work on, in a sentence." } } }
+            "description": "Index of memories (project + user preferences), one line each with a [handle]. Call once at task start, with the task in a sentence.",
+            "inputSchema": { "type": "object", "properties": { "project": project, "task": { "type": "string", "description": "The task, in a sentence." } } }
         },
         {
             "name": "brain_recall",
-            "description": "Search memories by meaning; returns the best few, each trimmed to its most relevant lines. Use this INSTEAD of searching old chats, transcripts or logs for what was decided or learned before, and before re-reading files.",
+            "description": "Search memories by meaning; best few, trimmed. Use instead of searching old chats or logs, and before re-reading files.",
             "inputSchema": { "type": "object", "properties": {
-                "query": { "type": "string", "description": "What you want to know, in plain words." },
+                "query": { "type": "string" },
                 "limit": { "type": "integer", "description": "Max memories (default 4).", "minimum": 1, "maximum": 12 },
                 "project": project
             }, "required": ["query"] }
@@ -122,38 +122,38 @@ fn tools() -> Value {
         },
         {
             "name": "brain_remember",
-            "description": "Save something worth knowing next time (one idea per memory). If a memory already says nearly the same, it's updated instead of duplicated.",
+            "description": "Save one durable fact, terse (fragments, no filler). Near-duplicates update the existing memory.",
             "inputSchema": { "type": "object", "properties": {
-                "type": { "type": "string", "enum": ["decision", "preference", "gotcha", "howto", "fact", "context"], "description": "decision: what was decided and why · preference: how the user likes things · gotcha: a trap that wastes time · howto: commands/steps · fact: about the project · context: current work in progress" },
-                "hook": { "type": "string", "description": "One line that states the point (shown in the index)." },
-                "details": { "type": "string", "description": "Optional details: reasons, commands, file paths. Keep it short." },
-                "scope": { "type": "string", "enum": ["project", "me"], "description": "\"me\" for preferences that apply to every project (default: project)." },
+                "type": { "type": "string", "enum": ["decision", "preference", "gotcha", "howto", "fact", "context"], "description": "decision (what+why) · preference · gotcha · howto · fact · context (work in progress)" },
+                "hook": { "type": "string", "description": "One-line point, shown in the index." },
+                "details": { "type": "string", "description": "Short details: reasons, commands, paths." },
+                "scope": { "type": "string", "enum": ["project", "me"], "description": "\"me\" = applies to every project (default: project)." },
                 "project": project
             }, "required": ["type", "hook"] }
         },
         {
             "name": "brain_handoff",
-            "description": "Save the hand-off note for this project: where things stand and what comes next, in a few lines (what's done, what's half-done, the next step, what to watch out for). It replaces the previous note and is shown first in brain_context, so the next session continues without reading this chat. Call it before you stop or at a natural pause.",
+            "description": "Save the hand-off note (replaces the last): done, half-done, next step, watch-outs. Shown first in brain_context. Call before stopping.",
             "inputSchema": { "type": "object", "properties": {
-                "text": { "type": "string", "description": "A few lines, under about 1,400 characters." },
+                "text": { "type": "string", "description": "Under ~1,400 chars, terse." },
                 "project": project
             }, "required": ["text"] }
         },
         {
             "name": "code_outline",
-            "description": "The definitions in one file (functions, types, classes, headings…) with line numbers and signatures: a few hundred tokens instead of the whole file. Read the outline first, then read only the lines you need.",
+            "description": "A file's definitions with line numbers and signatures, far cheaper than reading it. Then read only the lines you need.",
             "inputSchema": { "type": "object", "properties": {
-                "path": { "type": "string", "description": "File path, relative to the project root." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 400, "description": "Most definitions to list (default 120)." },
+                "path": { "type": "string", "description": "Path relative to project root." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 400, "description": "Max definitions (default 120)." },
                 "project": project
             }, "required": ["path"] }
         },
         {
             "name": "code_find",
-            "description": "Where a function, type, class or constant is defined, anywhere in the project: path:line and its signature. Use it before grepping.",
+            "description": "Where a function, type, class or constant is defined: path:line and signature. Use before grepping.",
             "inputSchema": { "type": "object", "properties": {
-                "name": { "type": "string", "description": "The identifier, e.g. brain_recall or SyncScope." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 60, "description": "Most results (default 20)." },
+                "name": { "type": "string", "description": "Identifier, e.g. SyncScope." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 60, "description": "Max results (default 20)." },
                 "project": project
             }, "required": ["name"] }
         },
@@ -169,21 +169,21 @@ fn tools() -> Value {
         },
         {
             "name": "brain_forget",
-            "description": "Remove a memory that's wrong or no longer true (by [handle]; it can be restored from the app's archive).",
+            "description": "Remove a wrong or outdated memory by [handle] (restorable from the app's archive).",
             "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }
         },
         {
             "name": "brain_map",
-            "description": "The project's code map: which file does what. With a query, only the matching files. Files changed or deleted since they were described are flagged — re-read only those.",
+            "description": "Code map: which file does what; a query narrows it. Files changed since described are flagged: re-read only those.",
             "inputSchema": { "type": "object", "properties": {
-                "query": { "type": "string", "description": "What you're looking for (e.g. \"where are sync conflicts resolved\"). Omit for the whole map." },
+                "query": { "type": "string", "description": "What you're looking for; omit for the whole map." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
                 "project": project
             } }
         },
         {
             "name": "brain_map_note",
-            "description": "Record what files do (path relative to the project root + a one-line purpose). An empty purpose removes the file from the map.",
+            "description": "Record what files do: path + one-line purpose (empty purpose removes it).",
             "inputSchema": { "type": "object", "properties": {
                 "files": { "type": "array", "items": { "type": "object", "properties": {
                     "path": { "type": "string" },
@@ -194,12 +194,12 @@ fn tools() -> Value {
         },
         {
             "name": "notes_vaults",
-            "description": "The user's note vaults (workspaces) you can use, with note counts. Encrypted vaults are never available.",
+            "description": "The user's note vaults with note counts (encrypted ones excluded).",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "notes_search",
-            "description": "Search the user's notes by words; returns [handle] Title — vault/folder: snippet. Searches every vault unless one is named.",
+            "description": "Search the user's notes; returns [handle] Title — vault/folder: snippet. All vaults unless one is named.",
             "inputSchema": { "type": "object", "properties": {
                 "query": { "type": "string" },
                 "vault": vault,
@@ -211,7 +211,7 @@ fn tools() -> Value {
             "description": "List the notes in a vault ([handle] Title — folder), optionally only one folder or tag.",
             "inputSchema": { "type": "object", "properties": {
                 "vault": vault,
-                "folder": { "type": "string", "description": "Folder path like \"Work/Projects\" or a folder name." },
+                "folder": { "type": "string", "description": "Folder path or name." },
                 "tag": { "type": "string" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 300, "description": "Max notes (default 60)." }
             } }
@@ -219,25 +219,25 @@ fn tools() -> Value {
         {
             "name": "notes_read",
             "description": "A note in full (Markdown), by [handle] or exact title.",
-            "inputSchema": { "type": "object", "properties": { "note": note }, "required": ["note"] }
+            "inputSchema": { "type": "object", "properties": { "note": note, "max_chars": { "type": "integer", "description": "Cut long notes here (default 12000)." } }, "required": ["note"] }
         },
         {
             "name": "notes_create",
-            "description": "Create a note (Markdown). The folder is created if it doesn't exist.",
+            "description": "Create a Markdown note; missing folders are created.",
             "inputSchema": { "type": "object", "properties": {
                 "title": { "type": "string" },
-                "body": { "type": "string", "description": "The note's text, in Markdown." },
+                "body": { "type": "string" },
                 "vault": vault,
-                "folder": { "type": "string", "description": "Folder path like \"Work/Projects\" (optional)." },
+                "folder": { "type": "string", "description": "Folder path (optional)." },
                 "tags": { "type": "array", "items": { "type": "string" } }
             }, "required": ["title", "body"] }
         },
         {
             "name": "notes_edit",
-            "description": "Change a note. For the text, use ONE of: old_text + new_text (replace an exact passage — preferred, cheapest), append (add to the end), or body (rewrite the whole text). title and tags can be changed alongside. The previous version stays in the note's history.",
+            "description": "Change a note's text with ONE of: old_text+new_text (exact passage, cheapest), append, or body (full rewrite); title/tags can change too. History is kept.",
             "inputSchema": { "type": "object", "properties": {
                 "note": note,
-                "old_text": { "type": "string", "description": "Exact text to replace (as notes_read shows it). Must appear once, unless replace_all." },
+                "old_text": { "type": "string", "description": "Exact text to replace; must be unique unless replace_all." },
                 "new_text": { "type": "string" },
                 "replace_all": { "type": "boolean" },
                 "append": { "type": "string" },
@@ -248,21 +248,21 @@ fn tools() -> Value {
         },
         {
             "name": "notes_delete",
-            "description": "Delete a note. It goes to the archive, where the user can restore it. To remove it for good, delete it again with permanent: true (only works on archived notes; only when the user asked for that).",
+            "description": "Archive a note (restorable). permanent:true removes an archived note for good, only if the user asked.",
             "inputSchema": { "type": "object", "properties": {
                 "note": note,
-                "permanent": { "type": "boolean", "description": "Remove an already-archived note for good. It can't be restored." }
+                "permanent": { "type": "boolean", "description": "Remove an archived note for good." }
             }, "required": ["note"] }
         },
         {
             "name": "notes_move",
-            "description": "Move a note OR a folder (with everything in it): into a folder, out to the top level (to_folder \"/\"), and/or to another vault (to_vault). Missing folders are created. Images go along.",
+            "description": "Move a note or a folder to to_folder (\"/\" = top level) and/or to_vault. Missing folders are created.",
             "inputSchema": { "type": "object", "properties": {
-                "note": { "type": "string", "description": "The note to move ([handle] or title)." },
-                "folder": { "type": "string", "description": "Or the folder to move (path or name), in 'vault'." },
+                "note": { "type": "string", "description": "Note to move." },
+                "folder": { "type": "string", "description": "Or the folder to move." },
                 "vault": vault,
-                "to_folder": { "type": "string", "description": "Destination folder path; \"/\" for the top level." },
-                "to_vault": { "type": "string", "description": "Destination vault, if it's another one." }
+                "to_folder": { "type": "string", "description": "Destination folder." },
+                "to_vault": { "type": "string", "description": "Destination vault." }
             } }
         },
         {
@@ -272,7 +272,7 @@ fn tools() -> Value {
         },
         {
             "name": "notes_folder_create",
-            "description": "Create a folder; a path like \"Work/Projects\" makes the missing folders along the way.",
+            "description": "Create a folder; paths like \"Work/Projects\" create missing parents.",
             "inputSchema": { "type": "object", "properties": { "path": { "type": "string" }, "vault": vault }, "required": ["path"] }
         },
         {
@@ -282,7 +282,7 @@ fn tools() -> Value {
         },
         {
             "name": "notes_folder_delete",
-            "description": "Delete a folder. Nothing in it is lost: its notes and subfolders move up a level.",
+            "description": "Delete a folder; its contents move up a level.",
             "inputSchema": { "type": "object", "properties": { "folder": { "type": "string" }, "vault": vault }, "required": ["folder"] }
         },
         {
@@ -292,15 +292,15 @@ fn tools() -> Value {
         },
         {
             "name": "plan_overview",
-            "description": "The user's planners (projects) with progress, and the current local date and time. Start here for anything about tasks, to-dos or the calendar.",
+            "description": "Planners with progress, plus the current local date/time. Start here for tasks, to-dos or the calendar.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "planner_create",
-            "description": "Make a planner (e.g. for building an app) with its tasks in one call: break the work into concrete steps, with priorities and due dates when they know them.",
+            "description": "Make a planner with its tasks in one call: concrete steps, with priorities and due dates when known.",
             "inputSchema": { "type": "object", "properties": {
                 "name": { "type": "string" }, "description": { "type": "string" },
-                "tasks": { "type": "array", "items": { "type": "object", "properties": { "title": { "type": "string" }, "notes": { "type": "string", "description": "Details." }, "status": { "type": "string", "enum": ["todo","doing","done"] }, "priority": { "type": "string", "enum": ["none","low","medium","high","urgent"] }, "due": { "type": "string", "description": "YYYY-MM-DD (all day) or YYYY-MM-DD HH:MM, the user's local time." }, "remind": { "type": "string", "description": "When to remind: YYYY-MM-DD HH:MM." }, "repeat": { "type": "string", "description": "daily, weekly, monthly, yearly, \"2 weeks\"… (needs a due date)." } }, "required": ["title"] } }
+                "tasks": { "type": "array", "items": { "type": "object", "properties": { "title": { "type": "string" }, "notes": { "type": "string" }, "status": { "type": "string", "enum": ["todo","doing","done"] }, "priority": { "type": "string", "enum": ["none","low","medium","high","urgent"] }, "due": { "type": "string", "description": "YYYY-MM-DD[ HH:MM], local time." }, "remind": { "type": "string", "description": "YYYY-MM-DD HH:MM." }, "repeat": { "type": "string", "description": "daily|weekly|monthly|yearly|\"2 weeks\"… (needs due)." } }, "required": ["title"] } }
             }, "required": ["name"] }
         },
         {
@@ -315,33 +315,33 @@ fn tools() -> Value {
         },
         {
             "name": "tasks_list",
-            "description": "The user's tasks as [handle] Title — details. Open tasks by default, most important first.",
-            "inputSchema": { "type": "object", "properties": { "planner": { "type": "string" }, "include_done": { "type": "boolean" }, "due_before": { "type": "string", "description": "Only tasks due before this date (YYYY-MM-DD) or time." }, "limit": { "type": "integer", "minimum": 1, "maximum": 300 } } }
+            "description": "Tasks as [handle] Title — details; open ones by default, most important first.",
+            "inputSchema": { "type": "object", "properties": { "planner": { "type": "string" }, "include_done": { "type": "boolean" }, "due_before": { "type": "string", "description": "Due before this date/time." }, "limit": { "type": "integer", "minimum": 1, "maximum": 300 } } }
         },
         {
             "name": "tasks_add",
             "description": "Add one or more tasks / to-dos.",
-            "inputSchema": { "type": "object", "properties": { "tasks": { "type": "array", "items": { "type": "object", "properties": { "title": { "type": "string" }, "notes": { "type": "string", "description": "Details." }, "status": { "type": "string", "enum": ["todo","doing","done"] }, "priority": { "type": "string", "enum": ["none","low","medium","high","urgent"] }, "due": { "type": "string", "description": "YYYY-MM-DD (all day) or YYYY-MM-DD HH:MM, the user's local time." }, "remind": { "type": "string", "description": "When to remind: YYYY-MM-DD HH:MM." }, "repeat": { "type": "string", "description": "daily, weekly, monthly, yearly, \"2 weeks\"… (needs a due date)." }, "planner": { "type": "string", "description": "Planner name or [handle]." } }, "required": ["title"] } } }, "required": ["tasks"] }
+            "inputSchema": { "type": "object", "properties": { "tasks": { "type": "array", "items": { "type": "object", "properties": { "title": { "type": "string" }, "notes": { "type": "string" }, "status": { "type": "string", "enum": ["todo","doing","done"] }, "priority": { "type": "string", "enum": ["none","low","medium","high","urgent"] }, "due": { "type": "string", "description": "YYYY-MM-DD[ HH:MM], local time." }, "remind": { "type": "string", "description": "YYYY-MM-DD HH:MM." }, "repeat": { "type": "string", "description": "daily|weekly|monthly|yearly|\"2 weeks\"… (needs due)." }, "planner": { "type": "string", "description": "Planner name or [handle]." } }, "required": ["title"] } } }, "required": ["tasks"] }
         },
         {
             "name": "tasks_edit",
-            "description": "Change a task (by [handle] or title): rename, reschedule, set status (\"done\" ticks it off, and a repeating task moves to its next date), priority, planner. An empty due / remind / planner / repeat clears it.",
-            "inputSchema": { "type": "object", "properties": { "task": { "type": "string" }, "title": { "type": "string" }, "notes": { "type": "string", "description": "Details." }, "status": { "type": "string", "enum": ["todo","doing","done"] }, "priority": { "type": "string", "enum": ["none","low","medium","high","urgent"] }, "due": { "type": "string", "description": "YYYY-MM-DD (all day) or YYYY-MM-DD HH:MM, the user's local time." }, "remind": { "type": "string", "description": "When to remind: YYYY-MM-DD HH:MM." }, "repeat": { "type": "string", "description": "daily, weekly, monthly, yearly, \"2 weeks\"… (needs a due date)." }, "planner": { "type": "string", "description": "Planner name or [handle]." } }, "required": ["task"] }
+            "description": "Change a task ([handle] or title): title, schedule, status (\"done\" ticks it; repeating tasks roll to the next date), priority, planner. Empty due/remind/planner/repeat clears it.",
+            "inputSchema": { "type": "object", "properties": { "task": { "type": "string" }, "title": { "type": "string" }, "notes": { "type": "string" }, "status": { "type": "string", "enum": ["todo","doing","done"] }, "priority": { "type": "string", "enum": ["none","low","medium","high","urgent"] }, "due": { "type": "string", "description": "YYYY-MM-DD[ HH:MM], local time." }, "remind": { "type": "string", "description": "YYYY-MM-DD HH:MM." }, "repeat": { "type": "string", "description": "daily|weekly|monthly|yearly|\"2 weeks\"… (needs due)." }, "planner": { "type": "string", "description": "Planner name or [handle]." } }, "required": ["task"] }
         },
         {
             "name": "tasks_delete",
-            "description": "Delete a task for good (prefer marking it done unless the user asked to delete it).",
+            "description": "Delete a task for good; prefer marking it done.",
             "inputSchema": { "type": "object", "properties": { "task": { "type": "string" } }, "required": ["task"] }
         },
         {
             "name": "calendar_list",
-            "description": "What's on the user's calendar between two dates: events and tasks due, including repeats.",
-            "inputSchema": { "type": "object", "properties": { "from": { "type": "string", "description": "YYYY-MM-DD or YYYY-MM-DD HH:MM" }, "to": { "type": "string", "description": "YYYY-MM-DD (through the end of that day) or YYYY-MM-DD HH:MM" } }, "required": ["from", "to"] }
+            "description": "Calendar events and due tasks between two dates, repeats included.",
+            "inputSchema": { "type": "object", "properties": { "from": { "type": "string", "description": "YYYY-MM-DD[ HH:MM]" }, "to": { "type": "string", "description": "YYYY-MM-DD (whole day) or with HH:MM" } }, "required": ["from", "to"] }
         },
         {
             "name": "calendar_add",
-            "description": "Put an event on the calendar (appointment, work session, trip). A date without a time makes an all-day event; a start time alone makes it an hour long.",
-            "inputSchema": { "type": "object", "properties": { "title": { "type": "string" }, "start": { "type": "string", "description": "YYYY-MM-DD or YYYY-MM-DD HH:MM, local time." }, "end": { "type": "string" }, "location": { "type": "string" }, "description": { "type": "string" }, "remind_minutes": { "type": "integer", "description": "Remind this many minutes before." } }, "required": ["title", "start"] }
+            "description": "Add an event. A date alone = all day; a start time alone = one hour.",
+            "inputSchema": { "type": "object", "properties": { "title": { "type": "string" }, "start": { "type": "string", "description": "YYYY-MM-DD[ HH:MM], local time." }, "end": { "type": "string" }, "location": { "type": "string" }, "description": { "type": "string" }, "remind_minutes": { "type": "integer", "description": "Remind this many minutes before." } }, "required": ["title", "start"] }
         },
         {
             "name": "calendar_edit",
@@ -482,7 +482,10 @@ impl Server {
                 let limit = args["limit"].as_u64().unwrap_or(60).clamp(1, 300) as usize;
                 self.store.agent_list(s(&args["vault"]).as_deref(), s(&args["folder"]).as_deref(), s(&args["tag"]).as_deref(), limit).map_err(err)
             }
-            "notes_read" => self.store.agent_read(&note()?).map_err(err),
+            "notes_read" => {
+                let max = args["max_chars"].as_u64().unwrap_or(12_000).clamp(500, 200_000) as usize;
+                self.store.agent_read(&note()?).map(|t| cap_text(t, max)).map_err(err)
+            }
             "notes_create" => {
                 let title = s(&args["title"]).ok_or("title is required")?;
                 let body = s(&args["body"]).unwrap_or_default();
@@ -634,29 +637,133 @@ fn run_hook(event: &str, db: &Path) {
     let _ = std::io::stdin().read_to_string(&mut raw);
     let input: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
     if let Some(text) = hook_output(event, &input, db) {
+        record_stat(db, event, &text);
         println!("{text}");
     }
 }
 
+fn stats_file(db: &Path) -> PathBuf {
+    db.parent().map(|d| d.join("brain-hook-stats.json")).unwrap_or_default()
+}
+
+fn read_stats(db: &Path) -> serde_json::Map<String, Value> {
+    std::fs::read_to_string(stats_file(db)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn today() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86_400)
+}
+
+/// Counts what the hooks add to the AI's context, per day (the last 60 days), for `astralis-mcp stats`.
+fn record_stat(db: &Path, event: &str, text: &str) {
+    fn bump(e: &mut Value, key: &str, n: u64) {
+        let v = e[key].as_u64().unwrap_or(0) + n;
+        e[key] = json!(v);
+    }
+    let mut all = read_stats(db);
+    let entry = all.entry(today().to_string()).or_insert_with(|| json!({}));
+    match event {
+        "session-start" => bump(entry, "sessions", 1),
+        "prompt" => {
+            bump(entry, "prompts", 1);
+            if text.len() > TERSE_REMINDER.len() {
+                bump(entry, "recalls", 1);
+            }
+        }
+        "subagent-start" => bump(entry, "subagents", 1),
+        _ => return,
+    }
+    bump(entry, "chars", text.chars().count() as u64);
+    if all.len() > 60 {
+        let mut days: Vec<u64> = all.keys().filter_map(|k| k.parse().ok()).collect();
+        days.sort_unstable();
+        for d in days.into_iter().take(all.len() - 60) {
+            all.remove(&d.to_string());
+        }
+    }
+    let _ = std::fs::write(stats_file(db), Value::Object(all).to_string());
+}
+
+/// `astralis-mcp stats`: what the hooks added lately, and what the tool list costs.
+fn stats_report(db: &Path) -> String {
+    let all = read_stats(db);
+    let sum = |from: u64| {
+        let mut t = [0u64; 5];
+        for (day, v) in &all {
+            if day.parse::<u64>().is_ok_and(|d| d >= from) {
+                for (i, k) in ["sessions", "prompts", "recalls", "subagents", "chars"].iter().enumerate() {
+                    t[i] += v[*k].as_u64().unwrap_or(0);
+                }
+            }
+        }
+        t
+    };
+    let line = |label: &str, t: [u64; 5]| format!("{label}: {} sessions, {} messages ({} with recalled memories), {} subagents; hooks added about {} tokens", t[0], t[1], t[2], t[3], t[4] / 4);
+    let tools_json = tools();
+    let count = tools_json.as_array().map_or(0, Vec::len);
+    format!(
+        "Astralis Brain hooks (about 4 characters per token)\n{}\n{}\nBrain tools: {count} tool definitions, about {} tokens, sent with every session",
+        line("Last 7 days", sum(today().saturating_sub(6))),
+        line("All recorded", sum(0)),
+        (tools_json.to_string().len() + INSTRUCTIONS.len()) / 4
+    )
+}
+
+/// Cuts a long result so a single read can't flood the context, and says how to get more.
+fn cap_text(text: String, max: usize) -> String {
+    let total = text.chars().count();
+    if total <= max {
+        return text;
+    }
+    let cut: String = text.chars().take(max).collect();
+    format!("{cut}\n…[cut: showing {max} of {total} characters; pass a larger max_chars for more]")
+}
+
+/// Terse-reply rules, always added by the session-start hook. Adapted from the "caveman" ruleset by
+/// Julius Brussee (https://github.com/JuliusBrussee/caveman, Apache-2.0): fewer output tokens, same facts.
+const TERSE_RULES: &str = "TERSE MODE (always on). Reply short: every fact stays, only fluff goes.
+1. Answer first, then the reason, then the next step.
+2. No greeting, hedging, recap, closer or offer of more help. No \"Sure!\", \"Let me\", \"I'll now\", \"Hope this helps\". No just/really/basically/actually/simply.
+3. Short words (\"fix\", not \"implement a solution for\"). Fragments are fine. Drop a/an/the when it still reads in one pass. Never drop not/never/no/only/except. Numbers and units exact.
+4. One idea per sentence, active voice, about 20 words at most. Clarity beats compression.
+5. Code, commands, paths, API names and errors stay verbatim (quote only the decisive error line). Show changed lines with a little context, not whole files, unless asked.
+6. Between routine tool calls write nothing. One line before a multi-step run, one line with the result at the end.
+7. Keep the user's language. Don't announce or act out the style (no caveman voice, no emoji, no decorative tables).
+Use full plain sentences for: security warnings, irreversible actions, step order a fragment could scramble, a confused user, questions or options you put to the user, and anything saved outside chat (code, comments, commits, PRs, docs, memory files).";
+
+/// The one-line reminder added to every message, so the style survives a long session.
+const TERSE_REMINDER: &str = "TERSE MODE: answer only what was asked, no filler, recap or follow-up offers; code, paths and errors exact; plain prose for warnings, irreversible actions and anything saved outside chat.";
+
 /// What a hook should add to the agent's context (nothing is `None`).
 fn hook_output(event: &str, input: &Value, db: &Path) -> Option<String> {
+    // Subagents start with no memory of this session: they get the terse rules, nothing else.
+    if event == "subagent-start" {
+        return Some(TERSE_RULES.to_string());
+    }
     let cwd = input["cwd"].as_str().map(PathBuf::from).or_else(|| std::env::var_os("CLAUDE_PROJECT_DIR").map(PathBuf::from)).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
     let mut store = Store::open(db).ok()?;
     let project = detect_project(&cwd);
     let folder = store.brain_project(&project.key, &project.name).ok()?;
     match event {
         // The index of what's remembered, at the start of a session (and after /clear or compaction).
-        "session-start" => store.brain_context_for(folder, Some(&project.root), None).ok(),
+        "session-start" => {
+            let index = store.brain_context_for(folder, Some(&project.root), None).ok().unwrap_or_default();
+            Some(if index.trim().is_empty() { TERSE_RULES.to_string() } else { format!("{TERSE_RULES}\n\n{index}") })
+        }
         // Memories that clearly match the message just sent; nothing when none do, and nothing
         // that this session was already given (it would only cost tokens again).
         "prompt" => {
-            let prompt = input["prompt"].as_str()?;
             let session = input["session_id"].as_str().unwrap_or("");
             let mut seen = hook_seen(db, session);
-            let (text, handles) = store.brain_hook_prompt_new(folder, prompt, &seen).ok()??;
-            seen.extend(handles);
-            remember_hook_seen(db, session, &seen);
-            Some(text)
+            let recalled = input["prompt"].as_str().and_then(|prompt| store.brain_hook_prompt_new(folder, prompt, &seen).ok().flatten());
+            Some(match recalled {
+                Some((text, handles)) => {
+                    seen.extend(handles);
+                    remember_hook_seen(db, session, &seen);
+                    format!("{TERSE_REMINDER}\n\n{text}")
+                }
+                None => TERSE_REMINDER.to_string(),
+            })
         }
         // When the agent is about to finish: once, remind it to save what it learned.
         "stop" => {
@@ -744,6 +851,10 @@ fn main() {
             None => dir.join("astralis.db"),
         }
     });
+    if std::env::args().nth(1).as_deref() == Some("stats") {
+        println!("{}", stats_report(&db));
+        return;
+    }
     // `astralis-mcp hook <event>`: for agent hooks (see run_hook), not the MCP server.
     if let Some(pos) = std::env::args().position(|a| a == "hook") {
         if let Some(event) = std::env::args().nth(pos + 1) {
@@ -813,21 +924,44 @@ mod hook_tests {
         };
         // Session start: the index (with the rule), including what's remembered.
         let start = hook_output("session-start", &input(json!({})), &db).expect("an index");
-        assert!(start.contains("Python is broken") && start.contains("not old chats"), "{start}");
+        assert!(start.contains("Python is broken") && start.contains("not old chats") && start.contains("TERSE MODE"), "{start}");
         // A relevant message gets the memory; the same memory isn't added to the next message.
         let first = hook_output("prompt", &input(json!({ "prompt": "write a python script to edit these files" })), &db).expect("recalled");
         assert!(first.contains("Python is broken"), "{first}");
-        assert!(hook_output("prompt", &input(json!({ "prompt": "another python script for editing more files" })), &db).is_none(), "already given this session");
+        let again = hook_output("prompt", &input(json!({ "prompt": "another python script for editing more files" })), &db).expect("the reminder");
+        assert!(!again.contains("Python is broken") && again.contains("TERSE MODE"), "already given this session: {again}");
         // Another session is given it again; unrelated or empty messages add nothing.
         let other = json!({ "cwd": cwd, "session_id": "s2", "prompt": "write a python script to edit these files" });
         assert!(hook_output("prompt", &other, &db).is_some());
-        assert!(hook_output("prompt", &input(json!({ "prompt": "thanks, that works" })), &db).is_none());
+        assert_eq!(hook_output("prompt", &input(json!({ "prompt": "thanks, that works" })), &db).as_deref(), Some(TERSE_REMINDER));
         // The save reminder: once, never while already continuing from one.
         assert!(hook_output("stop", &input(json!({ "stop_hook_active": true })), &db).is_none());
         let stop = hook_output("stop", &input(json!({ "stop_hook_active": false })), &db).expect("reminder");
         assert!(stop.contains("\"decision\":\"block\"") && stop.contains("brain_handoff"));
         assert!(hook_output("stop", &input(json!({ "stop_hook_active": false })), &db).is_none(), "rate limited");
         assert!(hook_output("nonsense", &input(json!({})), &db).is_none());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn subagents_get_the_rules_long_notes_are_cut_stats_count_and_the_tool_list_stays_small() {
+        let (proj, db) = setup("extras");
+        let sub = hook_output("subagent-start", &json!({ "cwd": proj.to_string_lossy() }), &db).expect("rules");
+        assert!(sub.contains("TERSE MODE") && !sub.contains("Brain"), "{sub}");
+        record_stat(&db, "session-start", "abc");
+        record_stat(&db, "prompt", TERSE_REMINDER);
+        record_stat(&db, "prompt", &format!("{TERSE_REMINDER} plus a memory"));
+        record_stat(&db, "subagent-start", "x");
+        record_stat(&db, "stop", "ignored");
+        let report = stats_report(&db);
+        assert!(report.contains("1 sessions, 2 messages (1 with recalled memories), 1 subagents"), "{report}");
+        let long = "x".repeat(50);
+        assert_eq!(cap_text(long.clone(), 50), long);
+        let cut = cap_text(long, 10);
+        assert!(cut.starts_with("xxxxxxxxxx\n") && cut.contains("showing 10 of 50"), "{cut}");
+        // A regression guard: every session pays for these, so they only get shorter.
+        let size = tools().to_string().len() + INSTRUCTIONS.len();
+        assert!(size < 16_000, "the Brain's tool list grew to {size} characters; keep it lean");
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 }
