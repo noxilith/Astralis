@@ -3,12 +3,30 @@
 // just enough to click around the interface. Encrypted vaults accept any password.
 import { mockIPC } from '@tauri-apps/api/mocks'
 import * as Y from 'yjs'
-import type { CalEvent, Folder, Note, NoteKind, Planner, Task, Template, Vault } from '../api'
+import type { CalEvent, Folder, Note, NoteKind, Planner, ProjectRow, Task, Template, Vault } from '../api'
 
 type Args = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
 
 const now = () => Date.now()
 const id = () => crypto.randomUUID()
+let mockTrusted = false
+let mockRunStart = 0
+let mockStopped = false
+const mockFiles: Record<string, string> = {
+  'README.md': '# Astralis\n\nLocal-first notes.\n',
+  'package.json': '{\n  "name": "astralis",\n  "scripts": { "dev": "vite" }\n}\n',
+  '.astralis/run.sh': '#!/bin/sh\ncd apps/desktop && npm run dev\n',
+  'src/main.rs': 'use std::collections::HashMap;\n\n/// Entry point.\nfn main() {\n    let mut seen: HashMap<String, u32> = HashMap::new();\n    for word in "a b a".split(\' \') {\n        *seen.entry(word.to_string()).or_insert(0) += 1;\n    }\n    println!("{seen:?}"); // 2 distinct\n}\n',
+  'src/app.tsx': "import { useState } from 'react'\n\nexport function App({ name }: { name: string }) {\n  const [n, setN] = useState(0)\n  return <button onClick={() => setN(n + 1)}>{name}: {n}</button>\n}\n",
+  'src/styles.css': '.app { display: grid; color: var(--text); }\n',
+}
+let projectsAuto = true
+let projectRows: ProjectRow[] = [
+  { hash: 'p1', name: 'Astralis', root: '/home/me/Projects/Astralis', here: true, sync: true, status: 'synced', cloud: { ts: now() - 3_600_000, deviceName: 'Laptop', branch: 'main', bytes: 18_400_000 }, suggest: '/home/me/Projects/Astralis' },
+  { hash: 'p2', name: 'website', root: '/home/me/Projects/website', here: true, sync: true, status: 'behind', cloud: { ts: now() - 600_000, deviceName: 'Desktop', branch: 'redesign', bytes: 4_200_000 }, suggest: '/home/me/Projects/website' },
+  { hash: 'p3', name: 'notes-cli', root: '/home/me/Projects/notes-cli', here: true, sync: false, status: 'off', cloud: null, suggest: '' },
+  { hash: 'p4', name: 'game-jam', root: '', here: false, sync: false, status: 'restore', cloud: { ts: now() - 86_400_000 * 3, deviceName: 'Desktop', branch: 'main', bytes: 52_000_000 }, suggest: '/home/me/Projects/game-jam' },
+]
 const vaults: Vault[] = [{ id: id(), name: 'Personal', createdAt: now(), encrypted: false, unlocked: true, noteCount: 0, owner: null, sharedWith: [], cloud: null }]
 /** A deterministic test graph: ~60% one linked web with hubs, ~20% small clusters, the rest alone. */
 function bigGraph(total: number, includeOrphans: boolean) {
@@ -372,6 +390,37 @@ const handlers: Record<string, (a: Args) => unknown> = {
     return name
   },
   cloud_sync_now: () => undefined,
+  projects_list: () => ({ drive: 'Google Drive', auto: projectsAuto, rows: projectRows }),
+  projects_sync_now: () => undefined,
+  projects_set_auto: ({ on }) => { projectsAuto = on },
+  projects_set_sync: ({ hash, on }) => {
+    const r = projectRows.find((p) => p.hash === hash)
+    if (r) { r.sync = on; r.status = on ? 'waiting' : 'off' }
+  },
+  projects_add: ({ path }) => {
+    projectRows.push({ hash: id(), name: String(path).split('/').filter(Boolean).pop() ?? 'project', root: path, here: true, sync: true, status: 'waiting', cloud: null, suggest: '' })
+  },
+  projects_forget: ({ hash }) => { projectRows = projectRows.filter((p) => p.hash !== hash) },
+  project_files: () => Object.keys(mockFiles).sort(),
+  project_read: ({ path }) => ({ text: mockFiles[path] ?? '', binary: false, tooBig: false, size: (mockFiles[path] ?? '').length }),
+  project_write: ({ path, text }) => { mockFiles[path] = text },
+  project_run_info: () => ({ name: 'Dev server', command: 'sh ./.astralis/run.sh', file: '.astralis/run.sh', trusted: mockTrusted, running: mockRunStart > 0 && !mockStopped }),
+  project_run: ({ confirmed }) => { if (confirmed) mockTrusted = true; mockRunStart = Date.now(); mockStopped = false },
+  project_run_output: ({ from }) => {
+    const all = ['> astralis@1.0.8 dev', '> vite', '', '  VITE v6 ready in 312 ms', '  ➜  Local:   http://localhost:1420/']
+    const shown = mockRunStart ? Math.min(all.length, 1 + Math.floor((Date.now() - mockRunStart) / 500)) : 0
+    return { lines: all.slice(from, shown), next: shown, running: mockRunStart > 0 && !mockStopped, exit: mockStopped ? 143 : null }
+  },
+  project_stop: () => { mockStopped = true },
+  projects_update: ({ hash }) => {
+    const r = projectRows.find((p) => p.hash === hash)
+    if (r) r.status = 'synced'
+  },
+  projects_restore: ({ hash, dest }) => {
+    const r = projectRows.find((p) => p.hash === hash)
+    if (r) { r.root = dest; r.here = true; r.sync = true; r.status = 'synced' }
+    return dest
+  },
   // Ask Astralis (pretend: canned replies).
   assistant_status: () => ({ ready: assistantReady, downloading: false, loaded: assistantReady, actions: [
     { id: 'improve', label: 'Improve writing', hint: 'Clearer, better flow', group: 'Rewrite', output: 'rewrite' },

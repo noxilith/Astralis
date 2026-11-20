@@ -18,6 +18,7 @@ use astralis_core::Store;
 use astralis_core::agent_notes::{AgentAccess, NoteEdit};
 use astralis_core::agent_plan::{AgentEvent, AgentEventEdit, AgentTask, AgentTaskEdit};
 use astralis_core::memory::{MapEntry, MemoryKind, file_mtime};
+use astralis_core::projects;
 use serde_json::{Value, json};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -54,38 +55,16 @@ struct Project {
 }
 
 fn detect_project(start: &Path) -> Project {
-    let start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
-    let mut dir = start.as_path();
-    let root = loop {
-        if dir.join(".git").exists() {
-            break dir.to_path_buf();
-        }
-        match dir.parent() {
-            Some(p) => dir = p,
-            None => break start.clone(),
-        }
-    };
-    // A remote URL survives clones and moves; otherwise the path.
-    let remote = std::fs::read_to_string(root.join(".git/config")).ok().and_then(|cfg| {
-        let mut in_origin = false;
-        for line in cfg.lines() {
-            let l = line.trim();
-            if l.starts_with('[') {
-                in_origin = l == "[remote \"origin\"]";
-            } else if in_origin && let Some(url) = l.strip_prefix("url =") {
-                return Some(url.trim().trim_end_matches(".git").to_string());
-            }
-        }
-        None
-    });
-    let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Project".into());
-    Project { key: remote.unwrap_or_else(|| root.to_string_lossy().to_string()), name, root }
+    let id = projects::identify(start);
+    Project { root: id.root, key: id.key, name: id.name }
 }
 
 struct Server {
     store: Store,
     default_root: PathBuf,
     source: String,
+    /// The app's data folder (project snapshots wait in `outbox` and `inbox` here).
+    dir: PathBuf,
 }
 
 fn text_result(text: impl Into<String>) -> Value {
@@ -370,6 +349,17 @@ impl Server {
         }
     }
 
+    /// After a hand-off: if this project is kept in the cloud, snapshot it for Astralis to upload.
+    fn snapshot_project(&mut self, args: &Value) -> String {
+        let start = args["project"].as_str().map(PathBuf::from).unwrap_or_else(|| self.default_root.clone());
+        let project = detect_project(&start);
+        let Ok(hash) = self.store.project_seen(&project.key, &project.name, &project.root) else { return String::new() };
+        match self.store.projects().ok().and_then(|mut m| m.remove(&hash)) {
+            Some(entry) if entry.sync => queue_snapshot(&self.store, &self.dir, &project, &hash, &entry.state),
+            _ => String::new(),
+        }
+    }
+
     fn call(&mut self, name: &str, args: &Value) -> Result<String, String> {
         let s = |v: &Value| v.as_str().map(str::to_owned);
         let err = |e: astralis_core::Error| e.to_string();
@@ -404,7 +394,8 @@ impl Server {
                 let (folder, _) = self.project(args)?;
                 let m = self.store.brain_handoff_save(folder, &s(&args["text"]).ok_or("text is required")?, &self.source.clone()).map_err(err)?;
                 self.after_write();
-                Ok(format!("Hand-off saved ([{}]). It's the first thing the next session sees.", m.short))
+                let snapshot = self.snapshot_project(args);
+                Ok(format!("Hand-off saved ([{}]). It's the first thing the next session sees.{snapshot}", m.short))
             }
             "code_outline" => {
                 let (_, root) = self.project(args)?;
@@ -719,6 +710,86 @@ fn cap_text(text: String, max: usize) -> String {
     format!("{cut}\n…[cut: showing {max} of {total} characters; pass a larger max_chars for more]")
 }
 
+/// Takes a snapshot of the project into the outbox (Astralis uploads it to the user's cloud).
+/// Returns a short note for the reply.
+fn queue_snapshot(store: &Store, dir: &Path, project: &Project, hash: &str, last_state: &str) -> String {
+    let outbox = dir.join("outbox");
+    if let Ok(Some(m)) = store.project_cloud_newer(hash) {
+        return format!(" Project not uploaded: {} has newer work in the cloud. The user updates it from Astralis → Projects first; don't pull it yourself.", m.device_name);
+    }
+    match projects::snapshot(&project.root, &project.key, &project.name, &store.device_id(), &projects::device_label(), &outbox, last_state) {
+        Ok(Some(snap)) => match serde_json::to_vec(&snap.manifest).map(|j| std::fs::write(outbox.join(format!("{hash}.json")), j)) {
+            Ok(Ok(())) => " Project snapshot queued for your cloud.".to_string(),
+            _ => " Project snapshot failed: couldn't write it.".to_string(),
+        },
+        Ok(None) => String::new(),
+        Err(e) => format!(" Project snapshot failed: {e}."),
+    }
+}
+
+/// What the session-start hook says about this project's cloud copy (nothing when it isn't synced).
+fn project_notice(store: &Store, project: &Project) -> Option<String> {
+    let hash = store.project_seen(&project.key, &project.name, &project.root).ok()?;
+    let entry = store.projects().ok()?.remove(&hash)?;
+    let mut lines = Vec::new();
+    // Once per project: the Run button in Astralis starts whatever the project says it runs.
+    let run_hint = format!("projects.runhint.{hash}");
+    let has_run = project.root.join(".astralis/run.json").exists() || project.root.join(".astralis/run.sh").exists();
+    if !has_run && store.get_setting(&run_hint).ok().flatten().is_none() {
+        let _ = store.set_setting(&run_hint, "1");
+        lines.push("ASTRALIS RUN BUTTON: if this project can be run (an app, dev server or script), write .astralis/run.json as {\"name\":\"…\",\"command\":\"…\"} (or a script at .astralis/run.sh) so the Run button in Astralis starts it. Skip it if there's nothing to run.".to_string());
+    }
+    if !entry.sync {
+        return (!lines.is_empty()).then(|| lines.join("\n"));
+    }
+    if let Ok(Some(m)) = store.project_cloud_newer(&hash) {
+        lines.push(format!("PROJECT SYNC: a newer copy of this project from {} is in the user's cloud. Tell the user to update it from Astralis → Projects (don't pull or overwrite it yourself); until then this device's hand-offs aren't uploaded.", m.device_name));
+    }
+    let hint = format!("projects.hint.{hash}");
+    if !project.root.join(projects::IGNORE_FILE).exists() && store.get_setting(&hint).ok().flatten().is_none() {
+        let _ = store.set_setting(&hint, "1");
+        lines.push(format!("PROJECT SYNC is on for this project. If it has big generated files git doesn't ignore (builds, caches, dumps, media), list them in {} (gitignore syntax) so snapshots stay small.", projects::IGNORE_FILE));
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// `astralis-mcp project <snapshot|status> [path]`: the project's cloud copy, by hand.
+fn run_project_command(args: &[String], db: &Path) -> i32 {
+    let say = |text: &str| println!("{text}");
+    let Ok(store) = Store::open(db) else {
+        eprintln!("astralis-mcp: can't open {}", db.display());
+        return 1;
+    };
+    let dir = db.parent().map(Path::to_path_buf).unwrap_or_default();
+    let start = args.get(1).map(PathBuf::from).or_else(|| std::env::var_os("CLAUDE_PROJECT_DIR").map(PathBuf::from)).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+    let project = detect_project(&start);
+    let hash = projects::project_hash(&project.key);
+    match args.first().map(String::as_str) {
+        Some("snapshot") => {
+            let _ = store.project_seen(&project.key, &project.name, &project.root);
+            let note = queue_snapshot(&store, &dir, &project, &hash, "");
+            say(if note.is_empty() { "Nothing to snapshot." } else { note.trim() });
+            0
+        }
+        Some("status") => {
+            let remote = store.projects_remote().unwrap_or_default();
+            for (h, e) in store.projects().unwrap_or_default() {
+                let cloud = match remote.get(&h) {
+                    Some(r) if r.manifest.ts > e.last_ts && r.manifest.device != store.device_id() => "cloud copy is newer",
+                    Some(_) => "in the cloud",
+                    None => "not in the cloud",
+                };
+                say(&format!("{} [{}] {}", e.name, if e.sync { "synced" } else { "not synced" }, cloud));
+            }
+            0
+        }
+        _ => {
+            say("usage: astralis-mcp project <snapshot|status> [path]");
+            1
+        }
+    }
+}
+
 /// Terse-reply rules, always added by the session-start hook. Adapted from the "caveman" ruleset by
 /// Julius Brussee (https://github.com/JuliusBrussee/caveman, Apache-2.0): fewer output tokens, same facts.
 const TERSE_RULES: &str = "TERSE MODE (always on). Reply short: every fact stays, only fluff goes.
@@ -748,7 +819,12 @@ fn hook_output(event: &str, input: &Value, db: &Path) -> Option<String> {
         // The index of what's remembered, at the start of a session (and after /clear or compaction).
         "session-start" => {
             let index = store.brain_context_for(folder, Some(&project.root), None).ok().unwrap_or_default();
-            Some(if index.trim().is_empty() { TERSE_RULES.to_string() } else { format!("{TERSE_RULES}\n\n{index}") })
+            let mut text = TERSE_RULES.to_string();
+            for part in [Some(index), project_notice(&store, &project)].into_iter().flatten().filter(|p| !p.trim().is_empty()) {
+                text.push_str("\n\n");
+                text.push_str(&part);
+            }
+            Some(text)
         }
         // Memories that clearly match the message just sent; nothing when none do, and nothing
         // that this session was already given (it would only cost tokens again).
@@ -851,7 +927,12 @@ fn main() {
             None => dir.join("astralis.db"),
         }
     });
-    if std::env::args().nth(1).as_deref() == Some("stats") {
+    // `astralis-mcp [--db …] project <snapshot|status> [path]`
+    if let Some(pos) = std::env::args().position(|a| a == "project") {
+        let rest: Vec<String> = std::env::args().skip(pos + 1).collect();
+        std::process::exit(run_project_command(&rest, &db));
+    }
+    if std::env::args().any(|a| a == "stats") {
         println!("{}", stats_report(&db));
         return;
     }
@@ -871,7 +952,8 @@ fn main() {
     };
     // Agents start servers in the project folder (Claude Code also passes CLAUDE_PROJECT_DIR).
     let default_root = std::env::var_os("CLAUDE_PROJECT_DIR").map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
-    let mut server = Server { store, default_root, source: "agent".into() };
+    let dir = db.parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut server = Server { store, default_root, source: "agent".into(), dir };
 
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
@@ -959,6 +1041,40 @@ mod hook_tests {
         assert_eq!(cap_text(long.clone(), 50), long);
         let cut = cap_text(long, 10);
         assert!(cut.starts_with("xxxxxxxxxx\n") && cut.contains("showing 10 of 50"), "{cut}");
+        // Project sync: a newer copy from another device is announced once it is on and listed.
+        let project = detect_project(&proj);
+        let hash = projects::project_hash(&project.key);
+        {
+            let store = Store::open(&db).unwrap();
+            store.project_seen(&project.key, &project.name, &project.root).unwrap();
+            assert!(store.projects().unwrap()[&hash].sync, "an agent working in a project adds it, synced");
+            store.project_set_sync(&hash, false).unwrap();
+            let off = hook_output("session-start", &json!({ "cwd": proj.to_string_lossy() }), &db).unwrap();
+            assert!(!off.contains("PROJECT SYNC"), "no sync lines while it's off");
+            assert!(off.contains(".astralis/run.json"), "the run hint doesn't depend on sync: {off}");
+            store.project_set_sync(&hash, true).unwrap();
+            let m = projects::Manifest { key: project.key.clone(), ts: 50, device: "other".into(), device_name: "Desktop".into(), ..Default::default() };
+            store.set_projects_remote(&std::collections::BTreeMap::from([(hash.clone(), projects::RemoteInfo { manifest: m, meta_id: "m".into(), bundle_id: "b".into() })])).unwrap();
+        }
+        let start = hook_output("session-start", &json!({ "cwd": proj.to_string_lossy() }), &db).unwrap();
+        assert!(start.contains("newer copy of this project from Desktop") && start.contains("don't pull") && start.contains(".astralisignore"), "{start}");
+        let again = hook_output("session-start", &json!({ "cwd": proj.to_string_lossy() }), &db).unwrap();
+        assert!(again.contains("newer copy") && !again.contains(".astralisignore") && !again.contains("run.json"), "the hints come once: {again}");
+        // A real repository is snapshotted for the app to upload.
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&proj).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap().status.success());
+        let _ = std::fs::remove_dir_all(proj.join(".git"));
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(proj.join("a.txt"), "hello").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "first"]);
+        let store = Store::open(&db).unwrap();
+        let held = queue_snapshot(&store, db.parent().unwrap(), &project, &hash, "");
+        assert!(held.contains("not uploaded") && held.contains("Desktop"), "held back while the cloud is newer: {held}");
+        assert!(!db.parent().unwrap().join("outbox").join(format!("{hash}.json")).exists());
+        store.project_mark(&hash, Some(50), None).unwrap();
+        let note = queue_snapshot(&store, db.parent().unwrap(), &project, &hash, "");
+        assert!(note.contains("queued"), "{note}");
+        assert!(db.parent().unwrap().join("outbox").join(format!("{hash}.json")).exists());
         // A regression guard: every session pays for these, so they only get shorter.
         let size = tools().to_string().len() + INSTRUCTIONS.len();
         assert!(size < 16_000, "the Brain's tool list grew to {size} characters; keep it lean");

@@ -15,6 +15,7 @@ pub mod drive;
 pub mod ms_oauth;
 pub mod oauth;
 pub mod onedrive;
+pub mod projects;
 pub mod sync;
 
 /// The HTTP client used for Google (re-exported so the app uses the same version).

@@ -167,6 +167,23 @@ export interface AssistantStatus { ready: boolean; downloading: boolean; loaded:
 export interface GoogleStatus { configured: boolean; builtin: boolean; clientId: string | null; email: string | null }
 export interface OneDriveStatus { configured: boolean; builtin: boolean; clientId: string | null; email: string | null }
 export type CloudProvider = 'google-drive' | 'onedrive'
+/** A project (git repository) kept in the user's cloud drive. */
+export interface ProjectRow {
+  hash: string
+  name: string
+  root: string
+  here: boolean
+  sync: boolean
+  status: 'synced' | 'waiting' | 'behind' | 'off' | 'restore' | 'missing'
+  cloud: { ts: number; deviceName: string; branch: string; bytes: number } | null
+  suggest: string
+}
+/** A project file as the viewer gets it. */
+export interface FileData { text: string | null; binary: boolean; tooBig: boolean; size: number }
+/** The project's run command (written by the AI tool in .astralis/run.json or run.sh). */
+export interface RunInfo { name: string; command: string; file: string; trusted: boolean; running: boolean }
+export interface RunOutput { lines: string[]; next: number; running: boolean; exit: number | null }
+export interface ProjectsInfo { drive: string | null; auto: boolean; rows: ProjectRow[] }
 /** A vault someone shared on OneDrive. */
 export interface SharedVault { folderId: string; name: string; ownerName: string }
 export interface CloudInvite { email: string; acceptedBy: string | null }
@@ -307,6 +324,24 @@ export const api = {
   /** Adds one of them to this device, from the Drive alone; returns its name. */
   cloudAddMine: (folderId: string, provider?: CloudProvider) => call<string>('cloud_add_mine', { folderId, provider }),
   cloudSyncNow: () => call<void>('cloud_sync_now'),
+  projectsList: () => call<ProjectsInfo>('projects_list'),
+  projectsSyncNow: () => call<void>('projects_sync_now'),
+  projectsSetAuto: (on: boolean) => call<void>('projects_set_auto', { on }),
+  projectsSetSync: (hash: string, on: boolean) => call<void>('projects_set_sync', { hash, on }),
+  projectsAdd: (path: string) => call<void>('projects_add', { path }),
+  projectsForget: (hash: string) => call<void>('projects_forget', { hash }),
+  projectFiles: (hash: string) => call<string[]>('project_files', { hash }),
+  projectRead: (hash: string, path: string) => call<FileData>('project_read', { hash, path }),
+  projectWrite: (hash: string, path: string, text: string) => call<void>('project_write', { hash, path, text }),
+  projectRunInfo: (hash: string) => call<RunInfo | null>('project_run_info', { hash }),
+  /** `confirmed`: the user just agreed to run this exact command. */
+  projectRun: (hash: string, confirmed: boolean) => call<void>('project_run', { hash, confirmed }),
+  projectRunOutput: (hash: string, from: number) => call<RunOutput>('project_run_output', { hash, from }),
+  projectStop: (hash: string) => call<void>('project_stop', { hash }),
+  /** Brings a project that is behind up to the cloud copy (refuses, saying why, if that would lose work). */
+  projectsUpdate: (hash: string) => call<void>('projects_update', { hash }),
+  /** Sets a cloud project up in a new or empty folder; returns the folder. */
+  projectsRestore: (hash: string, dest: string) => call<string>('projects_restore', { hash, dest }),
   openUrl: (url: string) => call<void>('open_url', { url }),
   /** What AI agents (through the Brain's MCP server) may do with the user's notes. */
   agentsNotesAccess: () => call<'edit' | 'read' | 'off'>('agents_notes_access'),

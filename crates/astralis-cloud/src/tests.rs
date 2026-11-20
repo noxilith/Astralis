@@ -314,3 +314,61 @@ async fn a_cloud_vault_made_on_one_device_is_found_added_and_shared_on_any_drive
     assert!(drive.shared.lock().unwrap().is_empty());
     assert!(join_ticket(&drive, &mine[0].folder_id, "friend@example.com").await.is_err());
 }
+
+#[tokio::test]
+async fn project_snapshots_are_sealed_on_the_drive_and_a_new_device_can_open_them() {
+    use astralis_core::projects::{Manifest, project_hash};
+    let drive = MemDrive::default();
+    drive.sign_in("me@example.com");
+    let (a, b) = (handle(), handle());
+    let tmp = |n: &str| {
+        let d = std::env::temp_dir().join(format!("astralis-cloudproj-{n}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    };
+    let (dir_a, dir_b) = (tmp("a"), tmp("b"));
+    let hash = project_hash("k");
+    // Three snapshots from device A, one after the other.
+    for ts in [1u64, 2, 3] {
+        std::fs::create_dir_all(dir_a.join("outbox")).unwrap();
+        let m = Manifest { key: "k".into(), name: "app".into(), ts, device: "dev-a".into(), state: format!("s{ts}"), ..Default::default() };
+        std::fs::write(dir_a.join("outbox").join(format!("{hash}.json")), serde_json::to_vec(&m).unwrap()).unwrap();
+        std::fs::write(dir_a.join("outbox").join(format!("{hash}.bundle")), format!("secret bundle {ts}")).unwrap();
+        assert_eq!(projects::push(&drive, &a, &dir_a).await.unwrap(), 1);
+    }
+    assert_eq!(projects::push(&drive, &a, &dir_a).await.unwrap(), 0, "nothing waiting");
+    assert!(!dir_a.join("outbox").join(format!("{hash}.json")).exists(), "uploaded snapshots leave the outbox");
+    assert_eq!(a.lock().unwrap().projects().unwrap().len(), 0, "marking an unknown project does nothing");
+    let names = drive.names();
+    assert_eq!(names.iter().filter(|n| n.ends_with(".astrp")).count(), 4, "the newest two snapshots stay: {names:?}");
+    assert!(drive.files.lock().unwrap().iter().all(|f| !String::from_utf8_lossy(&f.3).contains("secret bundle")), "the drive only sees ciphertext");
+
+    // Device B has nothing but the drive: it finds the key there and opens the newest snapshot.
+    projects::refresh(&drive, &b).await.unwrap();
+    let remote = b.lock().unwrap().projects_remote().unwrap();
+    assert_eq!((remote[&hash].manifest.name.as_str(), remote[&hash].manifest.ts), ("app", 3));
+    assert_eq!(a.lock().unwrap().get_setting("projects.key").unwrap(), b.lock().unwrap().get_setting("projects.key").unwrap(), "one key for the account");
+    let got = dir_b.join("got.bundle");
+    projects::download(&drive, &b, &hash, &got).await.unwrap();
+    assert_eq!(std::fs::read(&got).unwrap(), b"secret bundle 3");
+
+    // B knows the project: the cloud is newer, so B's own snapshot would not be uploaded over it.
+    {
+        let s = b.lock().unwrap();
+        s.project_seen("k", "app", std::path::Path::new("/work/app")).unwrap();
+        assert!(s.project_cloud_newer(&hash).unwrap().is_some());
+    }
+    std::fs::create_dir_all(dir_b.join("outbox")).unwrap();
+    let stale = Manifest { key: "k".into(), name: "app".into(), ts: 2, device: "dev-b".into(), ..Default::default() };
+    std::fs::write(dir_b.join("outbox").join(format!("{hash}.json")), serde_json::to_vec(&stale).unwrap()).unwrap();
+    std::fs::write(dir_b.join("outbox").join(format!("{hash}.bundle")), "older work").unwrap();
+    assert_eq!(projects::push(&drive, &b, &dir_b).await.unwrap(), 0, "newer work in the cloud isn't buried");
+    assert!(!dir_b.join("outbox").join(format!("{hash}.json")).exists());
+    assert_eq!(drive.names().iter().filter(|n| n.ends_with(".astrp")).count(), 4);
+    // Once B has taken that copy, it can upload again.
+    b.lock().unwrap().project_mark(&hash, Some(3), None).unwrap();
+    assert!(b.lock().unwrap().project_cloud_newer(&hash).unwrap().is_none());
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
+}

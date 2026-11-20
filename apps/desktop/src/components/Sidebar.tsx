@@ -1,9 +1,10 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { Archive, CalendarCheck, FileText, Network, Search, Settings, StickyNote, Brain as BrainIcon } from 'lucide-react'
+import { Archive, CalendarCheck, FileText, FolderGit2, Network, Search, Settings, StickyNote, Brain as BrainIcon } from 'lucide-react'
 import { PRODUCTIVITY_TABS, lastProductivityTab, type ProductivityTab } from '../views/Productivity'
 import { api } from '../api'
 import { useApp, type View } from '../context'
 import { NotesNav } from './NotesNav'
+import { ProjectsNav } from './ProjectsNav'
 import { AstralisMark } from './Logo'
 
 /** Left column: logo, the vault's notes tree, and an icon bar for every other section. */
@@ -36,7 +37,7 @@ export function Sidebar() {
         <AstralisMark size={30} />
         <span className="wordmark">Astralis</span>
       </div>
-      <NotesNav />
+      {view === 'projects' ? <ProjectsNav /> : <NotesNav />}
       <div className="rail">
         {icon('Notes', <StickyNote size={17} />, view === 'notes' && !archive, () => go('notes'))}
         {icon('Search (Ctrl K)', <Search size={17} />, false, () => setPaletteOpen(true))}
@@ -49,6 +50,7 @@ export function Sidebar() {
         )}
         {icon('Graph', <Network size={17} />, view === 'graph', () => go('graph'))}
         {icon('Brain — memory for your AI tools', <BrainIcon size={17} />, view === 'brain', () => go('brain'))}
+        {icon('Projects — your code, in your cloud drive', <FolderGit2 size={17} />, view === 'projects', () => go('projects'))}
         {icon('Templates', <FileText size={17} />, view === 'templates', () => go('templates'))}
         {icon('Archive', <Archive size={17} />, view === 'notes' && archive, () => {
           setListMode(archive ? { kind: 'tree' } : { kind: 'archive' })

@@ -10,6 +10,7 @@ import { QuickNote } from './components/QuickNote'
 import { startCollab } from './lib/collab'
 import { NoteEditor } from './views/NoteEditor'
 import { Productivity } from './views/Productivity'
+import { ProjectsView } from './views/ProjectsView'
 import { GraphView } from './views/GraphView'
 import { BrainView } from './views/BrainView'
 import { TemplatesView } from './views/TemplatesView'
@@ -103,6 +104,7 @@ function Shell() {
       {(view === 'tasks' || view === 'calendar' || view === 'planners') && <Productivity view={view} />}
       {view === 'graph' && <GraphView />}
       {view === 'brain' && <BrainView />}
+      {view === 'projects' && <ProjectsView />}
       {view === 'templates' && <TemplatesView />}
       {view === 'settings' && <SettingsView theme={theme} setTheme={setTheme} accent={accent} setAccent={setAccent} matugenPath={matugen.path} matugenFound={!!matugen.colors} />}
     </>

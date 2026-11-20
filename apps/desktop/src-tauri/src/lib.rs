@@ -7,6 +7,8 @@ mod assistant_cmds;
 mod brain_cmds;
 mod cloud;
 mod commands;
+mod projects_cmds;
+mod projects_ide;
 mod theme_cmds;
 pub mod update;
 
@@ -131,6 +133,7 @@ pub fn run() {
             if let Ok(profile) = std::env::var("ASTRALIS_PROFILE") {
                 data_dir = data_dir.join(format!("profile-{profile}"));
             }
+            projects_cmds::set_dir(data_dir.clone());
             let store = Store::open(data_dir.join("astralis.db"))?;
             let brain = Brain::new(find_model_dir(app.handle()));
             let state: SharedState = Arc::new(AppState {

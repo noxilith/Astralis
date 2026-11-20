@@ -46,6 +46,7 @@ export function CommandPalette({ onNewNote, onNewWhiteboard }: { onNewNote: () =
       go('planners', 'Planners'),
       go('graph', 'Graph'),
       go('brain', 'Brain'),
+      go('projects', 'Projects'),
       go('templates', 'Templates'),
       { label: 'Go to Archive', run: () => (setNoteId(null), setListMode({ kind: 'archive' }), setView('notes')) },
       go('settings', 'Settings'),

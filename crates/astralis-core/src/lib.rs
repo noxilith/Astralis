@@ -15,6 +15,7 @@ pub mod memory;
 pub mod merge;
 pub mod notes;
 pub mod planners;
+pub mod projects;
 pub mod search;
 pub mod store;
 pub mod sync;

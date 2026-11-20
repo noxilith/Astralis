@@ -133,6 +133,22 @@ async fn onedrive(state: &SharedState) -> Result<OneDrive> {
     Ok(d)
 }
 
+/// The provider project snapshots go to: the one chosen (setting `projects.provider`), else
+/// whichever of Google Drive and OneDrive is connected.
+pub(crate) fn projects_provider(state: &SharedState) -> Option<&'static str> {
+    let connected = |p: &str| setting(state, if p == ONEDRIVE { MS_REFRESH } else { REFRESH }).is_some();
+    let chosen = setting(state, "projects.provider");
+    [chosen.as_deref().unwrap_or(""), GOOGLE_DRIVE, ONEDRIVE].into_iter().find(|p| !p.is_empty() && connected(p)).map(|p| if p == ONEDRIVE { ONEDRIVE } else { GOOGLE_DRIVE })
+}
+
+/// The drive for project snapshots, if one is connected.
+pub(crate) async fn projects_drive(state: &SharedState) -> Result<Option<AnyDrive>> {
+    match projects_provider(state) {
+        Some(p) => Ok(Some(any_drive(state, p).await?)),
+        None => Ok(None),
+    }
+}
+
 /// The drive of a provider ("onedrive", otherwise Google Drive).
 async fn any_drive(state: &SharedState, provider: &str) -> Result<AnyDrive> {
     if provider == ONEDRIVE {
@@ -463,6 +479,9 @@ async fn sync_all(app: &AppHandle, state: &SharedState) -> Result<()> {
             Ok(d) => sync_provider(app, state, &d, vaults).await,
             Err(e) => tracing_warn(&format!("{provider} sync: {e}")),
         }
+    }
+    if let Err(e) = crate::projects_cmds::sync(state, false).await {
+        tracing_warn(&format!("project sync: {e}"));
     }
     Ok(())
 }
