@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ChevronDown, ChevronRight, File, FileCode, FileText, Folder, FolderGit2, Search } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, ChevronsUpDown, File, FileCode, FileText, Folder, FolderGit2, Search } from 'lucide-react'
 import { openFile, refreshFiles, refreshProjects, selectProject, useProjectsState } from '../lib/projectsState'
 
 interface Node {
@@ -40,6 +40,7 @@ export function ProjectsNav() {
   const s = useProjectsState()
   const [filter, setFilter] = useState('')
   const [closed, setClosed] = useState<Set<string>>(new Set())
+  const [menu, setMenu] = useState(false)
 
   useEffect(() => {
     void refreshProjects()
@@ -85,12 +86,33 @@ export function ProjectsNav() {
   return (
     <div className="notes-nav">
       <div className="notes-nav-head">
-        <select className="select" value={s.current ?? ''} onChange={(e) => selectProject(e.target.value)} disabled={s.projects.length === 0} aria-label="Project">
-          {s.projects.length === 0 && <option value="">No projects here yet</option>}
-          {s.projects.map((p) => (
-            <option key={p.hash} value={p.hash}>{p.name}</option>
-          ))}
-        </select>
+        <div className="row">
+          <div style={{ position: 'relative' }} className="grow">
+            <button className="vault-btn" onClick={() => setMenu((o) => !o)} title="Switch project">
+              <FolderGit2 size={15} />
+              <span className="grow ellipsis">{s.projects.find((p) => p.hash === s.current)?.name ?? 'No projects yet'}</span>
+              <ChevronsUpDown size={14} className="faint" />
+            </button>
+            {menu && (
+              <>
+                <div className="menu-backdrop" onClick={() => setMenu(false)} />
+                <div className="menu vault-menu">
+                  <div className="menu-label">Projects</div>
+                  {s.projects.length === 0 && <div className="small faint" style={{ padding: '6px 10px 8px' }}>None on this device yet.</div>}
+                  {s.projects.map((p) => (
+                    <button key={p.hash} onClick={() => (selectProject(p.hash), setMenu(false))}>
+                      <FolderGit2 size={14} />
+                      <span className="grow ellipsis">{p.name}</span>
+                      {p.status === 'behind' && <span className="faint small">cloud is newer</span>}
+                      {p.status === 'off' && <span className="faint small">not synced</span>}
+                      {p.hash === s.current ? <Check size={14} /> : <span style={{ width: 14 }} />}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
         <div className="search-box grow">
           <Search size={13} className="faint" />
           <input placeholder="Filter files…" value={filter} onChange={(e) => setFilter(e.target.value)} />

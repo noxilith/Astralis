@@ -25,6 +25,7 @@ const AUTO: &str = "projects.auto";
 /// committed is part of the repository's history and always travels with it.
 pub const IGNORE_FILE: &str = ".astralisignore";
 
+/// Always included, whatever git or `.astralisignore` say: `CLAUDE.md` and `AGENTS.md` (any folder).
 /// Always left out of the uncommitted work (generated files nobody needs to carry over).
 const DEFAULT_IGNORE: &str = "node_modules/
 target/
@@ -137,19 +138,21 @@ pub fn identify(start: &Path) -> ProjectId {
             None => break start.clone(),
         }
     };
-    // A remote URL survives clones and moves; otherwise the path.
-    let remote = std::fs::read_to_string(root.join(".git/config")).ok().and_then(|cfg| {
-        let mut in_origin = false;
-        for line in cfg.lines() {
-            let l = line.trim();
-            if l.starts_with('[') {
-                in_origin = l == "[remote \"origin\"]";
-            } else if in_origin && let Some(url) = l.strip_prefix("url =") {
-                return Some(url.trim().trim_end_matches(".git").to_string());
-            }
+    // A remote URL survives clones and moves; so does a key stored in the repository's own
+    // config (set when a project without a remote is restored on another computer); otherwise the path.
+    let config = std::fs::read_to_string(root.join(".git/config")).unwrap_or_default();
+    let (mut origin, mut stored, mut section) = (None, None, String::new());
+    for line in config.lines() {
+        let l = line.trim();
+        if l.starts_with('[') {
+            section = l.to_string();
+        } else if section == "[remote \"origin\"]" && let Some(url) = l.strip_prefix("url =") {
+            origin = origin.or_else(|| Some(url.trim().trim_end_matches(".git").to_string()));
+        } else if section == "[astralis]" && let Some(key) = l.strip_prefix("key =") {
+            stored = Some(key.trim().to_string());
         }
-        None
-    });
+    }
+    let remote = stored.filter(|k| !k.is_empty()).or(origin);
     let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Project".into());
     ProjectId { key: remote.unwrap_or_else(|| root.to_string_lossy().to_string()), name, root }
 }
@@ -239,6 +242,15 @@ fn wip_commit(root: &Path, head: &str) -> Result<(String, String)> {
             let mut reset = vec!["reset", "-q", "HEAD", "--"];
             reset.extend(chunk.iter().copied());
             let _ = with_index(&reset);
+        }
+        // The instruction files AI tools read always travel, even when git or .astralisignore
+        // would leave them out (but not copies inside generated folders like node_modules).
+        // One file name at a time: `git add` refuses everything if a pathspec matches nothing.
+        for name in ["CLAUDE.md", "AGENTS.md"] {
+            let mut keep = vec!["add".to_string(), "-f".into(), "--".into(), format!(":(glob)**/{name}")];
+            keep.extend(DEFAULT_IGNORE.lines().filter_map(|l| l.strip_suffix('/')).map(|d| format!(":(exclude,glob)**/{d}/**")));
+            let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
+            let _ = with_index(&keep);
         }
         let tree = with_index(&["write-tree"])?;
         if tree == git(root, &["rev-parse", "HEAD^{tree}"])? {
@@ -340,6 +352,9 @@ pub fn restore(dest: &Path, bundle: &Path, m: &Manifest) -> Result<()> {
     }
     if let Some(url) = &m.remote {
         let _ = git(dest, &["remote", "add", "origin", url]);
+    } else {
+        // Without a remote the project's identity would be this folder's path, which differs here.
+        let _ = git(dest, &["config", "astralis.key", &m.key]);
     }
     apply_wip(dest, &m.head, &m.wip)?;
     let _ = git(dest, &["update-ref", "-d", WIP_REF]);
@@ -526,7 +541,7 @@ mod tests {
         let out = base.join("out");
         std::fs::create_dir_all(&a).unwrap();
         g(&a, &["init", "-q", "-b", "main"]);
-        write(&a, ".gitignore", "secret.env\n");
+        write(&a, ".gitignore", "secret.env\nCLAUDE.md\n");
         write(&a, "src/lib.rs", "one\n");
         write(&a, "gone.txt", "to delete\n");
         g(&a, &["add", "-A"]);
@@ -540,7 +555,11 @@ mod tests {
         // Generated or unwanted files that git doesn't ignore: the built-in list and .astralisignore.
         write(&a, "node_modules/pkg/index.js", "x");
         write(&a, "renders/huge.bin", "big");
-        write(&a, ".astralisignore", "renders/\n");
+        write(&a, ".astralisignore", "renders/\nCLAUDE.md\n");
+        // Instruction files: kept even though both ignore files name them; not copies in generated folders.
+        write(&a, "CLAUDE.md", "be careful\n");
+        write(&a, "docs/CLAUDE.md", "docs rules\n");
+        write(&a, "node_modules/pkg/CLAUDE.md", "vendored\n");
         let status_before = git(&a, &["status", "--porcelain"]).unwrap();
 
         let snap = snapshot(&a, "https://example.com/me/app", "app", "dev1", "Laptop", &out, "").unwrap().expect("a snapshot");
@@ -564,6 +583,9 @@ mod tests {
         assert!(read(&b, "secret.env").is_none(), "ignored files are never copied");
         assert!(read(&b, "node_modules/pkg/index.js").is_none() && read(&b, "renders/huge.bin").is_none(), "the built-in list and .astralisignore are left out");
         assert!(read(&b, ".astralisignore").is_some(), "the ignore file itself travels");
+        assert_eq!(read(&b, "CLAUDE.md").as_deref(), Some("be careful\n"), "CLAUDE.md always goes through");
+        assert_eq!(read(&b, "docs/CLAUDE.md").as_deref(), Some("docs rules\n"));
+        assert!(read(&b, "node_modules/pkg/CLAUDE.md").is_none(), "but not one vendored in node_modules");
         assert_eq!(git(&b, &["remote", "get-url", "origin"]).unwrap(), "https://example.com/me/app.git");
         assert_eq!(git(&b, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(), "main");
         assert!(restore(&b, &snap.bundle, &snap.manifest).is_err(), "won't write into a folder that has files");
@@ -592,6 +614,24 @@ mod tests {
         assert_eq!(read(&c, "src/lib.rs").as_deref(), Some("one\ntwo\nthree\n"));
         write(&c, "dirty.txt", "x");
         assert!(matches!(pull(&c, &snap2.bundle, &snap2.manifest).unwrap(), PullOutcome::Blocked(_)), "unsaved work here blocks a pull");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_project_keeps_its_identity_when_restored_without_a_remote() {
+        let base = tmp("identity");
+        let a = base.join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        g(&a, &["init", "-q", "-b", "main"]);
+        write(&a, "f.txt", "x");
+        g(&a, &["add", "-A"]);
+        g(&a, &["commit", "-q", "-m", "one"]);
+        let id = identify(&a);
+        assert_eq!(id.key, a.canonicalize().unwrap().to_string_lossy(), "no remote: the path");
+        let snap = snapshot(&a, &id.key, &id.name, "d", "D", &base.join("out"), "").unwrap().unwrap();
+        let b = base.join("elsewhere").join("renamed");
+        restore(&b, &snap.bundle, &snap.manifest).unwrap();
+        assert_eq!(identify(&b).key, id.key, "the same project on the new computer, not a new one");
         let _ = std::fs::remove_dir_all(&base);
     }
 
