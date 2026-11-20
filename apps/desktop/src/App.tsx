@@ -33,6 +33,16 @@ function Shell() {
   // Peer-to-peer: device list, live presence, and refresh views when synced changes land.
   useEffect(() => startCollab(() => (bump(), void refreshVaults())), [bump, refreshVaults])
 
+  // Connecting a drive on a new computer brings the account's cloud vaults (and Brain) along.
+  useEffect(() => {
+    const un = listen<{ vaults: string[]; brain: boolean }>('cloud-imported', ({ payload: i }) => {
+      bump()
+      void refreshVaults()
+      toast(`Added ${i.vaults.length === 1 ? 'the cloud vault' : i.vaults.length + ' cloud vaults'} “${i.vaults.join('”, “')}” from your drive${i.brain ? '. The Brain now uses the cloud copy.' : '.'}`)
+    })
+    return () => void un.then((f) => f())
+  }, [bump, refreshVaults, toast])
+
   // Errors raised outside React (e.g. image uploads from the editor) surface as toasts.
   useEffect(() => {
     const onError = (e: Event) => fail((e as CustomEvent).detail)

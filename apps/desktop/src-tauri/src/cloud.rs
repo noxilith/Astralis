@@ -222,10 +222,74 @@ pub fn google_set_client(state: S<'_>, client_id: String, client_secret: String)
     Ok(())
 }
 
+/// What connecting a drive brought in from the account.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Imported {
+    /// Names of the cloud vaults added to this device.
+    vaults: Vec<String>,
+    /// This device's Brain is now the cloud one.
+    brain: bool,
+}
+
+/// Right after a drive is connected (a new computer, or a fresh install): adds the account's cloud
+/// vaults that aren't on this device yet, and, if one of them is the Brain and this device's own
+/// Brain has nothing in it, uses the cloud one so the memories and hand-offs come along. A Brain
+/// that already has memories is left alone (the cloud one is still added as a vault).
+async fn import_cloud_vaults(state: &SharedState, provider: &'static str) -> Result<Imported> {
+    let d = any_drive(state, provider).await?;
+    let mine = astralis_cloud::my_cloud_vaults(&d).await.map_err(err)?;
+    let mut vaults = Vec::new();
+    let mut cloud_brain = None;
+    for v in mine {
+        // Not ready: the device that made it hasn't put its key on the drive yet.
+        if !v.ready || state.store.lock().unwrap().get_vault(v.vault).is_ok() {
+            continue;
+        }
+        match astralis_cloud::add_my_cloud_vault(&d, &state.store, &v.folder_id).await {
+            Ok((id, name)) => {
+                if let Err(e) = astralis_cloud::sync_vault(&d, &state.store, id).await {
+                    tracing_warn(&format!("first sync of {name} failed: {e:#}"));
+                }
+                if name == astralis_core::memory::BRAIN_VAULT_NAME {
+                    cloud_brain = Some(id);
+                }
+                vaults.push(name);
+            }
+            Err(e) => tracing_warn(&format!("couldn't add {}: {e:#}", v.name)),
+        }
+    }
+    let brain = match cloud_brain {
+        Some(id) => state.store.lock().unwrap().use_cloud_brain(id)?,
+        None => false,
+    };
+    Ok(Imported { vaults, brain })
+}
+
+/// Runs the import in the background after connecting, and tells the app what came in.
+fn import_after_connect(app: AppHandle, state: SharedState, provider: &'static str) {
+    tauri::async_runtime::spawn(async move {
+        match import_cloud_vaults(&state, provider).await {
+            Ok(i) if !i.vaults.is_empty() => {
+                // Same events as a sync, so open views refresh.
+                let _ = app.emit("p2p", serde_json::json!({ "type": "synced", "peer": "drive", "notes": Vec::<String>::new() }));
+                if i.brain {
+                    let _ = app.emit("brain-changed", ());
+                }
+                let _ = app.emit("cloud-imported", i);
+            }
+            Ok(_) => {}
+            Err(e) => tracing_warn(&format!("importing cloud vaults failed: {e}")),
+        }
+    });
+}
+
 /// Opens Google sign-in in the browser; returns the connected account's email.
 #[tauri::command]
-pub async fn google_connect(state: S<'_>) -> Result<String> {
-    Ok(sign_in(state.inner(), false).await?.1)
+pub async fn google_connect(app: AppHandle, state: S<'_>) -> Result<String> {
+    let email = sign_in(state.inner(), false).await?.1;
+    import_after_connect(app, state.inner().clone(), GOOGLE_DRIVE);
+    Ok(email)
 }
 
 #[tauri::command]
@@ -274,7 +338,7 @@ pub fn onedrive_set_client(state: S<'_>, client_id: String) -> Result<()> {
 
 /// Opens Microsoft sign-in in the browser; returns the connected account's email.
 #[tauri::command]
-pub async fn onedrive_connect(state: S<'_>) -> Result<String> {
+pub async fn onedrive_connect(app: AppHandle, state: S<'_>) -> Result<String> {
     let id = ms_client_id(&state)?;
     let tokens = ms_oauth::sign_in(&state.cloud.http, &id, open_browser).await.map_err(err)?;
     let d = OneDrive::connect(state.cloud.http.clone(), tokens.access_token.clone()).await.map_err(err)?;
@@ -287,6 +351,7 @@ pub async fn onedrive_connect(state: S<'_>) -> Result<String> {
         s.set_setting(MS_EMAIL, &email)?;
     }
     *state.cloud.ms_tokens.lock().await = Some(tokens);
+    import_after_connect(app, state.inner().clone(), ONEDRIVE);
     Ok(email)
 }
 

@@ -503,6 +503,27 @@ impl Store {
         self.set_setting(VAULT_KEY, &id.to_string())
     }
 
+    /// A device that just connected the account's drive: use the cloud copy of the Brain (`cloud`)
+    /// when this device's own Brain is missing or empty (a new computer), so the memories and
+    /// hand-offs come along. A Brain that has memories, or is itself a cloud vault, is left alone.
+    /// The empty Brain this device made for itself is removed. Returns whether it switched.
+    pub fn use_cloud_brain(&mut self, cloud: Uuid) -> Result<bool> {
+        let current = self.get_setting(VAULT_KEY)?.and_then(|v| v.parse::<Uuid>().ok()).and_then(|v| self.get_vault(v).ok());
+        match current {
+            Some(cur) if cur.id == cloud => Ok(false),
+            Some(cur) if cur.note_count > 0 || cur.cloud.is_some() => Ok(false),
+            Some(cur) => {
+                self.set_brain_vault(cloud)?;
+                let _ = self.delete_vault(cur.id, None);
+                Ok(true)
+            }
+            None => {
+                self.set_brain_vault(cloud)?;
+                Ok(true)
+            }
+        }
+    }
+
     fn folder_named(&self, vault: Uuid, name: &str) -> Result<Option<Uuid>> {
         Ok(self.list_folders(Some(vault))?.into_iter().find(|f| f.parent_id.is_none() && f.name == name).map(|f| f.id))
     }

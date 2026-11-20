@@ -2232,3 +2232,32 @@ fn a_note_can_have_pages_that_stay_with_it() {
     s.delete_note(book.id).unwrap();
     assert_eq!(s.get_note(one.id).unwrap().parent_id, None, "pages of a deleted note become ordinary notes");
 }
+
+#[test]
+fn a_new_device_uses_the_cloud_brain_only_when_its_own_is_empty() {
+    use crate::memory::{BRAIN_VAULT_NAME, MemoryKind};
+    // A fresh computer: it made an empty Brain for itself; the account's cloud Brain arrives.
+    let mut s = Store::open_in_memory().unwrap();
+    let own = s.brain_vault().unwrap();
+    let cloud = s.create_vault(BRAIN_VAULT_NAME, None).unwrap().id;
+    assert!(s.use_cloud_brain(cloud).unwrap());
+    assert_eq!(s.brain_vault().unwrap(), cloud);
+    assert!(s.get_vault(own).is_err(), "the empty Brain it made for itself is removed");
+    assert!(!s.use_cloud_brain(cloud).unwrap(), "already using it");
+
+    // A computer whose Brain already has memories keeps them.
+    let mut t = Store::open_in_memory().unwrap();
+    let mine = t.brain_vault().unwrap();
+    let folder = t.brain_me().unwrap();
+    t.remember(folder, MemoryKind::Fact, "something I learned here", "", "test").unwrap();
+    let other = t.create_vault(BRAIN_VAULT_NAME, None).unwrap().id;
+    assert!(!t.use_cloud_brain(other).unwrap());
+    assert_eq!(t.brain_vault().unwrap(), mine);
+    assert!(t.get_vault(mine).is_ok());
+
+    // Never set up at all: take the cloud one.
+    let mut u = Store::open_in_memory().unwrap();
+    let cloud = u.create_vault(BRAIN_VAULT_NAME, None).unwrap().id;
+    assert!(u.use_cloud_brain(cloud).unwrap());
+    assert_eq!(u.brain_vault().unwrap(), cloud);
+}
