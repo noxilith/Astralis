@@ -48,6 +48,15 @@ Every platform has an installer and a portable version that runs without install
 | **Linux** (x64) | `…_linux_x64.flatpak`: `flatpak install` it, or open it in your software center | `…_linux_x64.AppImage`: make it executable and run |
 | **iOS** | Coming eventually | |
 
+**Flatpak repository** (installs and updates like any other Flatpak):
+
+```bash
+flatpak remote-add --user --if-not-exists astralis https://noxilith.github.io/Astralis/astralis.flatpakrepo
+flatpak install --user astralis app.astralis.desktop
+```
+
+Then `flatpak update` keeps it current. The repository is signed and rebuilt from each release by [a workflow](.github/workflows/flatpak-repo.yml).
+
 **Astralis keeps itself up to date.** It checks GitHub for a newer release when it starts (you
 can turn that off) and installs it in whichever form you have, then restarts. Updates are
 checked against the release's SHA-256 checksums before anything is replaced. Settings →

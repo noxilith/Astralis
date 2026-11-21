@@ -1,0 +1,136 @@
+# Keeps an installable Flatpak repository on GitHub Pages, so Astralis can be added as a remote:
+#
+#   flatpak remote-add --user --if-not-exists astralis https://noxilith.github.io/Astralis/astralis.flatpakrepo
+#   flatpak install --user astralis app.astralis.desktop
+#
+# Runs when a release is published: it takes that release's .flatpak, adds it to the repository
+# (kept on the gh-pages branch, signed), and republishes the site. Needs the secret
+# FLATPAK_GPG_PRIVATE_KEY (the repository's signing key, armored) and Pages set to serve the
+# gh-pages branch. Run it by hand (Actions → Flatpak repository → Run workflow) to rebuild the
+# repository from any release.
+
+name: Flatpak repository
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish (v1.2.3)
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: flatpak-repo
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish the repository
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-48
+      options: --privileged
+    env:
+      TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+      SITE: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+    steps:
+      - name: Tools
+        shell: bash
+        run: |
+          command -v git >/dev/null || dnf install -y git
+          command -v gpg >/dev/null || dnf install -y gnupg2
+
+      # The repository so far, so each release adds to it (and the last few stay installable).
+      - name: Previous repository
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: site
+        continue-on-error: true
+
+      - name: Signing key
+        shell: bash
+        env:
+          KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          test -n "$KEY" || { echo "::error::The secret FLATPAK_GPG_PRIVATE_KEY is not set"; exit 1; }
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s\n' "$KEY" | gpg --batch --import
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          echo "KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/ {print $10; exit}')" >> "$GITHUB_ENV"
+
+      - name: Download the release's bundle
+        shell: bash
+        run: |
+          curl -fsSL -o astralis.flatpak \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Astralis_${TAG#v}_linux_x64.flatpak"
+          ls -l astralis.flatpak
+
+      - name: Add it to the repository
+        shell: bash
+        run: |
+          mkdir -p site
+          [ -d site/repo/objects ] || ostree init --mode=archive-z2 --repo=site/repo
+          flatpak build-import-bundle --gpg-sign="$KEYID" --gpg-homedir="$GNUPGHOME" site/repo astralis.flatpak
+          flatpak build-update-repo --gpg-sign="$KEYID" --gpg-homedir="$GNUPGHOME" \
+            --generate-static-deltas --prune --prune-depth=2 --title="Astralis" site/repo
+          ostree refs --repo=site/repo
+
+      - name: Remote and install files
+        shell: bash
+        run: |
+          REF="$(ostree refs --repo=site/repo | grep '^app/app.astralis.desktop/' | head -1)"
+          BRANCH="${REF##*/}"
+          GPGKEY="$(gpg --export "$KEYID" | base64 -w0)"
+          cat > site/astralis.flatpakrepo <<EOF
+          [Flatpak Repo]
+          Title=Astralis
+          Url=$SITE/repo/
+          Homepage=https://github.com/${GITHUB_REPOSITORY}
+          Comment=Local-first notes, tasks and an AI memory for your tools
+          GPGKey=$GPGKEY
+          EOF
+          cat > site/app.astralis.desktop.flatpakref <<EOF
+          [Flatpak Ref]
+          Title=Astralis
+          Name=app.astralis.desktop
+          Branch=$BRANCH
+          Url=$SITE/repo/
+          SuggestRemoteName=astralis
+          IsRuntime=false
+          RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
+          GPGKey=$GPGKEY
+          EOF
+          cat > site/index.html <<EOF
+          <!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>Astralis Flatpak repository</title>
+          <style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:3rem auto;padding:0 1rem}pre{background:#8881;padding:.8rem;overflow:auto;border-radius:6px}</style>
+          <h1>Astralis Flatpak repository</h1>
+          <p>Add it once, then install and update like any other Flatpak:</p>
+          <pre>flatpak remote-add --user --if-not-exists astralis $SITE/astralis.flatpakrepo
+          flatpak install --user astralis app.astralis.desktop
+          flatpak update</pre>
+          <p>Or <a href="app.astralis.desktop.flatpakref">open the .flatpakref</a> in your software center.</p>
+          <p><a href="https://github.com/${GITHUB_REPOSITORY}">Source and release notes</a></p>
+          EOF
+          touch site/.nojekyll
+
+      # One commit each time: the repository's objects are the history that matters.
+      - name: Publish to gh-pages
+        shell: bash
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          rm -rf site/.git
+          cd site
+          git init -q -b gh-pages
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Flatpak repository: ${TAG}"
+          git push -q --force "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
