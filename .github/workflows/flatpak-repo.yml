@@ -76,6 +76,8 @@ jobs:
         run: |
           mkdir -p site
           [ -d site/repo/objects ] || ostree init --mode=archive-z2 --repo=site/repo
+          # git drops empty folders, and ostree needs these when the repository comes back from gh-pages
+          mkdir -p site/repo/refs/heads site/repo/refs/remotes site/repo/tmp site/repo/extensions site/repo/state
           flatpak build-import-bundle --gpg-sign="$KEYID" --gpg-homedir="$GNUPGHOME" site/repo astralis.flatpak
           flatpak build-update-repo --gpg-sign="$KEYID" --gpg-homedir="$GNUPGHOME" \
             --generate-static-deltas --prune --prune-depth=2 --title="Astralis" site/repo
