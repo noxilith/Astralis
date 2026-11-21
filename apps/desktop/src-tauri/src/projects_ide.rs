@@ -56,7 +56,7 @@ fn resolve(root: &Path, rel: &str) -> Result<PathBuf> {
 
 /// The project's files: tracked, plus new ones that aren't ignored (`.gitignore`).
 fn list_files(root: &Path) -> Result<Vec<String>> {
-    let mut cmd = Command::new("git");
+    let mut cmd = astralis_core::projects::git_command();
     cmd.arg("-C").arg(root).args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"]).stdin(Stdio::null()).stderr(Stdio::null());
     #[cfg(windows)]
     {

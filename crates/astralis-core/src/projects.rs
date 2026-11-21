@@ -190,8 +190,19 @@ fn without_credentials(url: &str) -> String {
 
 // ---- git ----
 
+/// A `git` command. Inside a Flatpak sandbox there is no git (the runtime doesn't carry one),
+/// so it runs on the host through `flatpak-spawn --host`; the home folder is shared, so paths match.
+pub fn git_command() -> Command {
+    if Path::new("/.flatpak-info").exists() {
+        let mut c = Command::new("flatpak-spawn");
+        c.args(["--host", "--env=GIT_TERMINAL_PROMPT=0", "git"]);
+        return c;
+    }
+    Command::new("git")
+}
+
 fn command(root: &Path) -> Command {
-    let mut c = Command::new("git");
+    let mut c = git_command();
     c.arg("-C").arg(root).stdin(Stdio::null()).env("GIT_TERMINAL_PROMPT", "0");
     #[cfg(windows)]
     {
