@@ -6,7 +6,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Astralis</title>
     <!-- The first frame (before the app draws) is dark, never white. -->
-    <style>html, body { background: #0e0d17; }</style>
+    <!-- A linked file, not an inline <style>: Tauri puts a nonce on inline styles in the CSP, and a nonce makes
+         browsers ignore 'unsafe-inline', which blocks the stylesheet CodeMirror adds at runtime. -->
+    <link rel="stylesheet" href="/boot.css" />
   </head>
   <body>
     <div id="root"></div>
