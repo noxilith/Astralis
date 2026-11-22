@@ -283,6 +283,16 @@ fn start_minimized_if_asked(app: &AppHandle) {
             .ok()
             .and_then(|s| s.get_setting("start_minimized").ok().flatten())
             .is_some_and(|v| v == "on");
+    // GTK 3 cannot ask the compositor to draw the titlebar (no xdg-decoration), so on a desktop that draws none itself
+    // (Vesper) the window would keep a GTK titlebar of its own. Ask for an undecorated window there, or when
+    // ASTRALIS_NO_DECORATIONS=1 asks for it. Every other desktop keeps its titlebar.
+    #[cfg(target_os = "linux")]
+    {
+        let vesper = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.split(':').any(|p| p.eq_ignore_ascii_case("vesper")));
+        if vesper || std::env::var("ASTRALIS_NO_DECORATIONS").is_ok_and(|v| v == "1") {
+            let _ = win.set_decorations(false);
+        }
+    }
     let _ = win.show();
     if minimized {
         let _ = win.minimize();
