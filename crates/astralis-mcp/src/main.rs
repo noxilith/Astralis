@@ -37,6 +37,16 @@ Only when asked about tasks or the calendar: plan_overview first (it gives today
 
 fn data_dir() -> PathBuf {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default();
+    #[cfg(target_os = "linux")]
+    {
+        // The Flatpak app keeps its data under ~/.var/app/<id>/data, but AI tools start this server on the
+        // host (from the Flatpak's files), where XDG_DATA_HOME points elsewhere: follow the app's own folder.
+        let in_flatpak_files = std::env::current_exe().is_ok_and(|p| p.to_string_lossy().contains("/flatpak/app/app.astralis.desktop/"));
+        let app_data = home.join(".var/app/app.astralis.desktop/data");
+        if in_flatpak_files && app_data.join("app.astralis.desktop").exists() {
+            return app_data.join("app.astralis.desktop");
+        }
+    }
     let base = if cfg!(target_os = "macos") {
         home.join("Library/Application Support")
     } else if cfg!(windows) {
